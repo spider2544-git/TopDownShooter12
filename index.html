@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Top Down Shooter - Prototype</title>
+        <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+        <canvas id="game"></canvas>
+        <script src="/socket.io/socket.io.js"></script>
+        <script src="src/debug.js"></script>
+        <!-- Performance optimization: Network batching -->
+        <script src="src/performance/networkBatcher.js"></script>
+        <script src="src/networking.js"></script>
+	<!-- Shared universal modules (work in browser + Node.js) -->
+	<script src="src/shared/seededRNG.js"></script>
+	<script src="src/shared/collisionHelpers.js"></script>
+	<script src="src/shared/objectPool.js"></script>
+	<!-- Phase 3: Network protocol - versioned event definitions + validation -->
+	<script src="src/shared/protocol.js"></script>
+	<!-- Performance optimizations -->
+	<script src="src/performance/pooledObjects.js"></script>
+	<script src="src/performance/optimizedSpatialGrid.js"></script>
+	<!-- Level configurations -->
+	<script src="src/levels/LevelConfigs.js"></script>
+	<!-- Game mode system -->
+	<script src="src/levels/GameModeConfigs.js"></script>
+	<script src="src/levels/modes/ClientBaseMode.js"></script>
+	<script src="src/levels/modes/ClientTestMode.js"></script>
+	<script src="src/levels/modes/ClientExtractionMode.js"></script>
+	<script src="src/levels/modes/ClientPayloadMode.js"></script>
+	<script src="src/levels/modes/ClientTrenchRaidMode.js"></script>
+	<script src="src/environment.js"></script>
+        <script src="src/environmentLobby.js"></script>
+        <script src="src/player.js"></script>
+        <script src="src/hats.js"></script>
+        <script src="src/skins.js"></script>
+        <!-- Abilities system -->
+        <script src="src/abilities/AbilityBase.js"></script>
+        <script src="src/abilities/AbilityManager.js"></script>
+        <script src="src/abilities/ShieldWall.js"></script>
+        <script src="src/abilities/ProximityMine.js"></script>
+        <script src="src/abilities/HealingBox.js"></script>
+        <script src="src/abilities/AutoTurret.js"></script>
+        <script src="src/abilities/MolotovPool.js"></script>
+        <script src="src/abilities/EnvironmentFirePool.js"></script>
+        <script src="src/abilities/MustardGasCanister.js"></script>
+        <script src="src/abilities/EnemyAttractor.js"></script>
+        <script src="src/hazards/ExplodingBarrel.js"></script>
+        <!-- Weapon progression config must load before weapons.js -->
+        <script src="src/weaponProgressionConfig.js"></script>
+        <script src="src/weapons.js"></script>
+        <script src="src/enemies.js"></script>
+        <script src="src/bosses.js"></script>
+        <script src="src/director.js"></script>
+        <script src="src/ui.js"></script>
+        <script src="src/mode.js"></script>
+        <script src="src/objects.js"></script>
+        <script src="src/DialogueBox.js"></script>
+        <script src="src/dialogueLoader.js"></script>
+        <script src="src/NPC.js"></script>
+        <script src="src/Troop.js"></script>
+        <script src="src/merchantShop.js"></script>
+        <!-- New refactored modules -->
+        <script src="src/core/constants.js"></script>
+        <script src="src/core/gameState.js"></script>
+        <script src="src/input/inputManager.js"></script>
+        <script src="src/rendering/camera.js"></script>
+        <script src="src/rendering/multiplayerRenderer.js"></script>
+        <script src="src/scenes/sceneManager.js"></script>
+	<script src="src/client/ClientBootstrap.js"></script>
+	<script src="src/client/ClientUpdate.js"></script>
+	<script src="src/client/ClientRender.js"></script>
+	<script src="src/client/GameLoop.js"></script>
+	<!-- Phase 1: GameContext - central integration point for client state -->
+	<script src="src/client/GameContext.js"></script>
+	<script src="main.js" defer></script>
+</body>
+</html>
+

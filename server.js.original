@@ -1,0 +1,2245 @@
+const express = require('express');
+const http = require('http');
+const socketIo = require('socket.io');
+const path = require('path');
+const { ServerDebugger } = require('./src/server-debug.js');
+
+// Load client Director logic for server-side enemy movement (window shim)
+let DirectorClass = null;
+try {
+    global.window = {};
+    require('./src/director.js');
+    DirectorClass = global.window && global.window.Director ? global.window.Director : null;
+} catch (e) {
+    console.error('[Server] Failed to load Director for server-side enemies:', e && e.message ? e.message : String(e));
+} finally {
+    try { delete global.window; } catch(_) {}
+}
+
+// Seeded Random Number Generator for server-side world generation
+class SeededRNG {
+    constructor(seed) {
+        this.seed = seed % 2147483647;
+        if (this.seed <= 0) this.seed += 2147483646;
+        this.current = this.seed;
+    }
+    
+    random() {
+        this.current = (this.current * 16807) % 2147483647;
+        return (this.current - 1) / 2147483646;
+    }
+    
+    randomInt(min, max) {
+        return Math.floor(this.random() * (max - min + 1)) + min;
+    }
+    
+    randomFloat(min, max) {
+        return this.random() * (max - min) + min;
+    }
+    
+    pick(array) {
+        if (!Array.isArray(array) || array.length === 0) return undefined;
+        return array[Math.floor(this.random() * array.length)];
+    }
+    
+    reset() {
+        this.current = this.seed;
+    }
+    
+    getSeed() {
+        return this.seed;
+    }
+}
+
+// Server-side Environment class for collision detection
+class ServerEnvironment {
+    constructor(worldSeed) {
+        this.boundary = 11000;
+        this.maxRange = 10000;
+        this.obstacles = [];
+        this.spawnSafeX = 0;
+        this.spawnSafeY = 0;
+        this.spawnSafeRadius = 200;
+        
+        // Initialize RNG with world seed
+        this.rng = new SeededRNG(worldSeed);
+        this._generateObstacles();
+    }
+    
+    // Collision helper methods
+    _clamp(v, min, max) { return v < min ? min : (v > max ? max : v); }
+
+    _circleIntersectsRect(cx, cy, cr, ob) {
+        const left = ob.x - ob.w / 2;
+        const top = ob.y - ob.h / 2;
+        const right = left + ob.w;
+        const bottom = top + ob.h;
+        const closestX = this._clamp(cx, left, right);
+        const closestY = this._clamp(cy, top, bottom);
+        const dx = cx - closestX;
+        const dy = cy - closestY;
+        return (dx * dx + dy * dy) < (cr * cr);
+    }
+
+    // Returns true if circle hits any obstacle
+    circleHitsAny(cx, cy, cr) {
+        for (let i = 0; i < this.obstacles.length; i++) {
+            if (this._circleIntersectsRect(cx, cy, cr, this.obstacles[i])) return true;
+        }
+        return false;
+    }
+
+    // Check if a circle is inside the world bounds
+    isInsideBounds(cx, cy, cr) {
+        const b = this.boundary;
+        return (cx - cr >= -b && cx + cr <= b && cy - cr >= -b && cy + cr <= b);
+    }
+
+    // Main collision resolution method
+    resolveCircleMove(x, y, radius, dx, dy) {
+        let newX = x;
+        let newY = y;
+        
+        // Move along X
+        if (dx !== 0) {
+            newX += dx;
+            for (let i = 0; i < this.obstacles.length; i++) {
+                const ob = this.obstacles[i];
+                if (!this._circleIntersectsRect(newX, newY, radius, ob)) continue;
+                const left = ob.x - ob.w / 2;
+                const top = ob.y - ob.h / 2;
+                const right = left + ob.w;
+                const bottom = top + ob.h;
+                // Only resolve if vertically overlapping enough
+                if (newY + radius <= top || newY - radius >= bottom) continue;
+                if (dx > 0) newX = left - radius; else newX = right + radius;
+            }
+        }
+        
+        // Move along Y
+        if (dy !== 0) {
+            newY += dy;
+            for (let i = 0; i < this.obstacles.length; i++) {
+                const ob = this.obstacles[i];
+                if (!this._circleIntersectsRect(newX, newY, radius, ob)) continue;
+                const left = ob.x - ob.w / 2;
+                const top = ob.y - ob.h / 2;
+                const right = left + ob.w;
+                const bottom = top + ob.h;
+                // Only resolve if horizontally overlapping enough
+                if (newX + radius <= left || newX - radius >= right) continue;
+                if (dy > 0) newY = top - radius; else newY = bottom + radius;
+            }
+        }
+        
+        // Clamp to world boundary
+        const b = this.boundary;
+        if (newX > b - radius) newX = b - radius;
+        if (newX < -b + radius) newX = -b + radius;
+        if (newY > b - radius) newY = b - radius;
+        if (newY < -b + radius) newY = -b + radius;
+        
+        return { x: newX, y: newY };
+    }
+    
+    _generateObstacles() {
+        console.log('[ServerEnvironment] Generating obstacles with seed:', this.rng.getSeed());
+        
+        const max = this.maxRange;
+        const numSmall = 1400; // car-sized
+        const numLarge = 320;  // building-sized
+
+        // Small car-sized rectangles
+        for (let i = 0; i < numSmall; i++) {
+            const w = this.rng.randomFloat(28, 56);
+            const h = this.rng.randomFloat(18, 34);
+            const candidate = {
+                type: 'small',
+                x: this.rng.randomFloat(-max, max),
+                y: this.rng.randomFloat(-max, max),
+                w,
+                h,
+                fill: this.rng.pick(['#242936', '#252b3a', '#293043']),
+                stroke: '#000000'
+            };
+            if (this._circleIntersectsRect(this.spawnSafeX, this.spawnSafeY, this.spawnSafeRadius, candidate)) {
+                continue;
+            }
+            this.obstacles.push(candidate);
+        }
+
+        // Large building-sized rectangles
+        for (let i = 0; i < numLarge; i++) {
+            const w = this.rng.randomFloat(160, 360);
+            const h = this.rng.randomFloat(120, 320);
+            const candidate = {
+                type: 'large',
+                x: this.rng.randomFloat(-max, max),
+                y: this.rng.randomFloat(-max, max),
+                w,
+                h,
+                fill: this.rng.pick(['#2c3343', '#31384a', '#353e52']),
+                stroke: '#0b0d12'
+            };
+            if (this._circleIntersectsRect(this.spawnSafeX, this.spawnSafeY, this.spawnSafeRadius, candidate)) {
+                continue;
+            }
+            this.obstacles.push(candidate);
+        }
+        
+        console.log('[ServerEnvironment] Generated', this.obstacles.length, 'obstacles');
+    }
+    // Segment vs AABB helper
+    _segmentIntersectsRect(x1, y1, x2, y2, ob) {
+        const left = ob.x - ob.w / 2;
+        const right = ob.x + ob.w / 2;
+        const top = ob.y - ob.h / 2;
+        const bottom = ob.y + ob.h / 2;
+        // Cohen–Sutherland style outcode checks
+        let x = x1, y = y1, xE = x2, yE = y2;
+        const INSIDE = 0, LEFT = 1, RIGHT = 2, BOTTOM = 4, TOP = 8;
+        const outCode = (px, py) => {
+            let code = INSIDE;
+            if (px < left) code |= LEFT; else if (px > right) code |= RIGHT;
+            if (py < top) code |= TOP; else if (py > bottom) code |= BOTTOM;
+            return code;
+        };
+        let code1 = outCode(x, y);
+        let code2 = outCode(xE, yE);
+        while (true) {
+            if (!(code1 | code2)) return true; // both inside => trivially accept intersection with rect
+            if (code1 & code2) return false; // both outside on same side => no intersection
+            let codeOut = code1 ? code1 : code2;
+            let ix = 0, iy = 0;
+            if (codeOut & TOP) { // above
+                ix = x + (xE - x) * (top - y) / (yE - y);
+                iy = top;
+            } else if (codeOut & BOTTOM) { // below
+                ix = x + (xE - x) * (bottom - y) / (yE - y);
+                iy = bottom;
+            } else if (codeOut & RIGHT) { // right of
+                iy = y + (yE - y) * (right - x) / (xE - x);
+                ix = right;
+            } else { // LEFT
+                iy = y + (yE - y) * (left - x) / (xE - x);
+                ix = left;
+            }
+            if (codeOut === code1) { x = ix; y = iy; code1 = outCode(x, y); }
+            else { xE = ix; yE = iy; code2 = outCode(xE, yE); }
+        }
+    }
+    // Line-of-sight check between two points against obstacle rectangles
+    lineHitsAny(x1, y1, x2, y2) {
+        for (let i = 0; i < this.obstacles.length; i++) {
+            const ob = this.obstacles[i];
+            if (this._segmentIntersectsRect(x1, y1, x2, y2, ob)) return true;
+        }
+        return false;
+    }
+}
+
+// Server-side Lobby Environment class for collision detection (matches client EnvironmentLobby)
+class ServerEnvironmentLobby {
+    constructor(worldSeed) {
+        this.boundary = 1000; // Match client EnvironmentLobby boundary
+        this.maxRange = 900; // not used for random obstacles here
+        this.obstacles = [];
+        this.spawnSafeX = 0;
+        this.spawnSafeY = 0;
+        this.spawnSafeRadius = 180; // Match client EnvironmentLobby
+        
+        // Initialize RNG with world seed (for consistency, though not used for obstacles)
+        this.rng = new SeededRNG(worldSeed);
+        this._addMerchantStall();
+    }
+    
+    // Collision helper methods (same as ServerEnvironment)
+    _clamp(v, min, max) { return v < min ? min : (v > max ? max : v); }
+
+    _circleIntersectsRect(cx, cy, cr, ob) {
+        const left = ob.x - ob.w / 2;
+        const top = ob.y - ob.h / 2;
+        const right = left + ob.w;
+        const bottom = top + ob.h;
+        const closestX = this._clamp(cx, left, right);
+        const closestY = this._clamp(cy, top, bottom);
+        const dx = cx - closestX;
+        const dy = cy - closestY;
+        return (dx * dx + dy * dy) < (cr * cr);
+    }
+
+    // Returns true if circle hits any obstacle
+    circleHitsAny(cx, cy, cr) {
+        for (let i = 0; i < this.obstacles.length; i++) {
+            if (this._circleIntersectsRect(cx, cy, cr, this.obstacles[i])) return true;
+        }
+        return false;
+    }
+
+    // Check if a circle is inside the world bounds
+    isInsideBounds(cx, cy, cr) {
+        const b = this.boundary;
+        return (cx - cr >= -b && cx + cr <= b && cy - cr >= -b && cy + cr <= b);
+    }
+
+    // Main collision resolution method (same as ServerEnvironment)
+    resolveCircleMove(x, y, radius, dx, dy) {
+        let newX = x;
+        let newY = y;
+        
+        // Move along X
+        if (dx !== 0) {
+            newX += dx;
+            for (let i = 0; i < this.obstacles.length; i++) {
+                const ob = this.obstacles[i];
+                if (!this._circleIntersectsRect(newX, newY, radius, ob)) continue;
+                const left = ob.x - ob.w / 2;
+                const top = ob.y - ob.h / 2;
+                const right = left + ob.w;
+                const bottom = top + ob.h;
+                // Only resolve if vertically overlapping enough
+                if (newY + radius <= top || newY - radius >= bottom) continue;
+                if (dx > 0) newX = left - radius; else newX = right + radius;
+            }
+        }
+        
+        // Move along Y
+        if (dy !== 0) {
+            newY += dy;
+            for (let i = 0; i < this.obstacles.length; i++) {
+                const ob = this.obstacles[i];
+                if (!this._circleIntersectsRect(newX, newY, radius, ob)) continue;
+                const left = ob.x - ob.w / 2;
+                const top = ob.y - ob.h / 2;
+                const right = left + ob.w;
+                const bottom = top + ob.h;
+                // Only resolve if horizontally overlapping enough
+                if (newX + radius <= left || newX - radius >= right) continue;
+                if (dy > 0) newY = top - radius; else newY = bottom + radius;
+            }
+        }
+        
+        // Clamp to world boundary
+        const b = this.boundary;
+        if (newX > b - radius) newX = b - radius;
+        if (newX < -b + radius) newX = -b + radius;
+        if (newY > b - radius) newY = b - radius;
+        if (newY < -b + radius) newY = -b + radius;
+        
+        return { x: newX, y: newY };
+    }
+    
+    // Add merchant stall obstacles (matches client EnvironmentLobby exactly)
+    _addMerchantStall() {
+        console.log('[ServerEnvironmentLobby] Adding merchant stall obstacles');
+        try {
+            const b = this.boundary;
+            // Base anchor near upper center
+            const ax = 0;
+            const ay = -b + 120; // slightly below top wall
+            // Counter (horizontal)
+            this.obstacles.push({ x: ax, y: ay + 26, w: 240, h: 22, fill: '#4a3a24', stroke: '#000000' });
+            // Sandbag rows (left and right)
+            this.obstacles.push({ x: ax - 180, y: ay, w: 150, h: 20, fill: '#b29f6b', stroke: '#2b2b2b' });
+            this.obstacles.push({ x: ax + 180, y: ay, w: 150, h: 20, fill: '#b29f6b', stroke: '#2b2b2b' });
+            // Crates stacks (left/right, two-high)
+            this.obstacles.push({ x: ax - 240, y: ay - 10, w: 40, h: 40, fill: '#6b4f2e', stroke: '#1f140b' });
+            this.obstacles.push({ x: ax - 240, y: ay - 54, w: 40, h: 40, fill: '#6b4f2e', stroke: '#1f140b' });
+            this.obstacles.push({ x: ax + 240, y: ay - 10, w: 40, h: 40, fill: '#6b4f2e', stroke: '#1f140b' });
+            this.obstacles.push({ x: ax + 240, y: ay - 54, w: 40, h: 40, fill: '#6b4f2e', stroke: '#1f140b' });
+            // Banner posts (thin verticals)
+            this.obstacles.push({ x: ax - 140, y: ay - 50, w: 10, h: 120, fill: '#553c2a', stroke: '#000000' });
+            this.obstacles.push({ x: ax + 140, y: ay - 50, w: 10, h: 120, fill: '#553c2a', stroke: '#000000' });
+            // Ammo crates in front corners (do not block central approach)
+            this.obstacles.push({ x: ax - 160, y: ay + 60, w: 36, h: 24, fill: '#5a7a3a', stroke: '#0f1a09' });
+            this.obstacles.push({ x: ax + 160, y: ay + 60, w: 36, h: 24, fill: '#5a7a3a', stroke: '#0f1a09' });
+            // Metal supply box behind counter (decoration behind merchant)
+            this.obstacles.push({ x: ax, y: ay - 40, w: 120, h: 18, fill: '#444c56', stroke: '#0c0f13' });
+            
+            console.log('[ServerEnvironmentLobby] Added', this.obstacles.length, 'merchant stall obstacles');
+        } catch(e) {
+            console.error('[ServerEnvironmentLobby] Error adding merchant stall:', e);
+        }
+    }
+}
+
+const app = express();
+const server = http.createServer(app);
+const io = socketIo(server, {
+    cors: {
+        origin: "*",
+        methods: ["GET", "POST"]
+    }
+});
+
+// Serve static files
+app.use(express.static(path.join(__dirname)));
+
+// Debug system
+const serverDebugger = new ServerDebugger();
+
+// Game state management
+const rooms = new Map();
+const TICK_RATE = 60; // Server simulation tick rate  
+const BROADCAST_RATE = 60; // Client update rate (matches TICK_RATE to prevent position correction jitter)
+
+// Room class to manage game state
+class GameRoom {
+    constructor(roomId) {
+        this.id = roomId;
+        this.players = new Map();
+        this.lastTick = Date.now();
+        this.tickCount = 0;
+        this.boundary = 1000; // default to lobby boundary, updated when players join
+        this.scene = 'lobby'; // default scene type
+        
+        // Generate deterministic world seed for synchronized world generation
+        this.worldSeed = Math.floor(Math.random() * 1000000000);
+        console.log(`[SEED] Generated world seed for room "${roomId}":`, this.worldSeed);
+        
+        // Create server-side environment for collision detection based on scene
+        this.environment = this._createEnvironmentForScene(this.scene);
+        console.log(`[ROOM] Created server environment for scene "${this.scene}" with ${this.environment.obstacles.length} obstacles, boundary: ${this.boundary}`);
+        
+        // Ready timer state synchronization
+        this.readyTimer = {
+            started: false,
+            completed: false,
+            timeTotal: 10.0,
+            timeLeft: 0,
+            startedBy: null
+        };
+
+        // Chest state per room: id -> { id, x, y, variant, opening, opened, timeTotal, timeLeft, startedBy, drops }
+        this.chests = new Map();
+        
+        // Server-authoritative ground items (inventory drops) per room
+        this.groundItems = new Map(); // id -> { id, x, y, vx, vy, label, rarityName, color }
+        this.nextItemId = 1;
+        
+        // Server-authoritative target dummy for weapon testing
+        this.targetDummy = null;
+        
+        // Server-authoritative ambient NPCs for lobby
+        this.ambientNpcs = [];
+        this.ambientSpawned = false; // Prevent race condition on concurrent joins
+        
+        // Server-authoritative level spawns (chests, npc placements)
+        this.levelSpawns = null;
+        
+        // Server-authoritative enemies (spawn locations only for now)
+        this.enemies = new Map(); // id -> { id, x, y, type }
+        this.nextEnemyId = 1;
+
+        // Enemy networking/movement mode (authoritative once in level)
+        this.enemyNetMode = 'spawnOnly'; // 'spawnOnly' | 'authoritative'
+        this.ENEMY_BROADCAST_HZ = 15;
+        this._enemyBroadcastIntervalMs = 1000 / this.ENEMY_BROADCAST_HZ;
+        this._nextEnemyBroadcastTime = 0;
+        this._enemyDirectors = new Map(); // playerId -> Director instance
+        this._enemyIdMap = new Map(); // serverId (string) -> numeric id for Director
+        this._enemyIdCounter = 1;
+        
+        // Active boomer puke pools in the room (server-authoritative)
+        // Each: { x, y, radius, ttl }
+        this.boomerPools = [];
+        
+        // Start room simulation loop with drift-aware scheduling
+        this._destroyed = false;
+        this._tickIntervalMs = 1000 / TICK_RATE;
+        this._broadcastIntervalMs = 1000 / BROADCAST_RATE;
+        this._tickHandle = null;
+        this._broadcastHandle = null;
+        this._nextTickTime = null;
+        this._nextBroadcastTime = null;
+
+        this.tick();
+        this._nextTickTime = Date.now() + this._tickIntervalMs;
+        this._scheduleTickLoop();
+
+        this._nextBroadcastTime = Date.now() + this._broadcastIntervalMs;
+        this._scheduleBroadcastLoop();
+    }
+
+    _scheduleTickLoop() {
+        if (this._destroyed) return;
+        const run = () => {
+            this._tickHandle = null;
+            if (this._destroyed) return;
+            this.tick();
+            const now = Date.now();
+            if (!Number.isFinite(this._nextTickTime)) {
+                this._nextTickTime = now + this._tickIntervalMs;
+            }
+            while (this._nextTickTime <= now) {
+                this._nextTickTime += this._tickIntervalMs;
+            }
+            const delay = Math.max(0, this._nextTickTime - now);
+            this._tickHandle = setTimeout(run, delay);
+        };
+        const delay = Math.max(0, this._nextTickTime - Date.now());
+        this._tickHandle = setTimeout(run, delay);
+    }
+
+    _scheduleBroadcastLoop() {
+        if (this._destroyed) return;
+        const run = () => {
+            this._broadcastHandle = null;
+            if (this._destroyed) return;
+            this.broadcastGameState();
+            const now = Date.now();
+            if (!Number.isFinite(this._nextBroadcastTime)) {
+                this._nextBroadcastTime = now + this._broadcastIntervalMs;
+            }
+            while (this._nextBroadcastTime <= now) {
+                this._nextBroadcastTime += this._broadcastIntervalMs;
+            }
+            const delay = Math.max(0, this._nextBroadcastTime - now);
+            this._broadcastHandle = setTimeout(run, delay);
+        };
+        const delay = Math.max(0, this._nextBroadcastTime - Date.now());
+        this._broadcastHandle = setTimeout(run, delay);
+    }
+
+    sendRoomSnapshot(socket) {
+        if (!socket) return;
+        socket.emit('roomSnapshot', {
+            boundary: this.boundary,
+            scene: this.scene,
+            obstacles: this.environment?.obstacles || [],
+            readyTimer: {
+                started: this.readyTimer.started,
+                completed: this.readyTimer.completed,
+                timeLeft: this.readyTimer.timeLeft,
+                timeTotal: this.readyTimer.timeTotal,
+                startedBy: this.readyTimer.startedBy
+            },
+            groundItems: Array.from(this.groundItems.values()),
+            targetDummy: this.targetDummy,
+            ambientNpcs: this.ambientNpcs,
+            levelSpawns: this.levelSpawns,
+            enemies: Array.from(this.enemies.values())
+        });
+    }
+
+    emitReadyTimerState(targetSocket) {
+        const payload = {
+            started: this.readyTimer.started,
+            completed: this.readyTimer.completed,
+            timeLeft: this.readyTimer.timeLeft,
+            timeTotal: this.readyTimer.timeTotal,
+            startedBy: this.readyTimer.startedBy
+        };
+        if (targetSocket) targetSocket.emit('readyTimerUpdate', payload);
+        else io.to(this.id).emit('readyTimerUpdate', payload);
+    }
+
+    broadcastAmbientNpcs() {
+        io.to(this.id).emit('ambientNpcsSync', this.ambientNpcs);
+    }
+
+    // Target dummy management
+    updateTargetDummy(deltaTime) {
+        if (!this.targetDummy) return;
+        // Simple placeholder: could handle regen or timers later
+        // Keep within bounds if needed
+        if (!Number.isFinite(this.targetDummy.x) || !Number.isFinite(this.targetDummy.y)) {
+            this.targetDummy.x = 0;
+            this.targetDummy.y = 0;
+        }
+    }
+
+    createTargetDummy() {
+        // Initialize or respawn target dummy at lobby upper-left corner by default
+        const radius = 32;
+        const healthMax = 5000;
+        const b = Number.isFinite(this.boundary) ? this.boundary : 1000;
+        let x = -b + radius + 100;
+        let y = -b + radius + 100;
+        // If blocked or outside bounds, nudge inward deterministically until clear
+        try {
+            const env = this.environment;
+            if (env && (env.circleHitsAny || env.isInsideBounds)) {
+                const isClear = (cx, cy) => {
+                    if (env.isInsideBounds && !env.isInsideBounds(cx, cy, radius)) return false;
+                    if (env.circleHitsAny && env.circleHitsAny(cx, cy, radius)) return false;
+                    return true;
+                };
+                if (!isClear(x, y)) {
+                    let found = false;
+                    // Try a simple grid search inward from the corner
+                    for (let step = 0; step < 20 && !found; step++) {
+                        const offset = 40 + step * 30;
+                        const candidates = [
+                            { cx: x + offset, cy: y },
+                            { cx: x, cy: y + offset },
+                            { cx: x + offset, cy: y + offset },
+                            { cx: x + offset * 1.5, cy: y + offset * 1.5 }
+                        ];
+                        for (let i = 0; i < candidates.length; i++) {
+                            const c = candidates[i];
+                            if (isClear(c.cx, c.cy)) { x = c.cx; y = c.cy; found = true; break; }
+                        }
+                    }
+                }
+            }
+        } catch(_) {}
+        this.targetDummy = {
+            x,
+            y,
+            radius,
+            healthMax,
+            health: healthMax,
+            alive: true
+        };
+        // Clear any existing DOT handle
+        if (this._dummyDotHandle) {
+            clearInterval(this._dummyDotHandle);
+            this._dummyDotHandle = null;
+        }
+        io.to(this.id).emit('targetDummySpawned', {
+            x: this.targetDummy.x,
+            y: this.targetDummy.y,
+            health: this.targetDummy.health,
+            healthMax: this.targetDummy.healthMax,
+            alive: this.targetDummy.alive
+        });
+    }
+
+    damageTargetDummy(amount /* number */, byPlayerId /* string */) {
+        if (!this.targetDummy || !this.targetDummy.alive) return;
+        const dmg = Math.max(0, Number(amount) || 0);
+        if (dmg <= 0) return;
+        this.targetDummy.health = Math.max(0, this.targetDummy.health - dmg);
+        if (this.targetDummy.health <= 0) {
+            this.targetDummy.alive = false;
+            // Stop DOT if running
+            if (this._dummyDotHandle) {
+                clearInterval(this._dummyDotHandle);
+                this._dummyDotHandle = null;
+            }
+            io.to(this.id).emit('targetDummyDied', {});
+        } else {
+            io.to(this.id).emit('targetDummyDamaged', { health: this.targetDummy.health });
+        }
+    }
+
+    applyDotToTargetDummy(dps /* number */, duration /* seconds */, byPlayerId /* string */) {
+        if (!this.targetDummy || !this.targetDummy.alive) return;
+        const ticksPerSecond = 10; // 100ms per tick
+        const intervalMs = 1000 / ticksPerSecond;
+        const totalTicks = Math.max(1, Math.round((Number(duration) || 0) * ticksPerSecond));
+        const damagePerTick = Math.max(0, (Number(dps) || 0) / ticksPerSecond);
+        // Stop any existing DOT to avoid stacking for now
+        if (this._dummyDotHandle) {
+            clearInterval(this._dummyDotHandle);
+            this._dummyDotHandle = null;
+        }
+        let ticks = 0;
+        this._dummyDotHandle = setInterval(() => {
+            if (!this.targetDummy || !this.targetDummy.alive) {
+                clearInterval(this._dummyDotHandle);
+                this._dummyDotHandle = null;
+                return;
+            }
+            this.damageTargetDummy(damagePerTick, byPlayerId);
+            ticks++;
+            if (ticks >= totalTicks) {
+                clearInterval(this._dummyDotHandle);
+                this._dummyDotHandle = null;
+            }
+        }, intervalMs);
+    }
+
+    // Helper method to create appropriate environment based on scene
+    _createEnvironmentForScene(scene) {
+        if (scene === 'lobby') {
+            const env = new ServerEnvironmentLobby(this.worldSeed);
+            env.boundary = this.boundary;
+            return env;
+        } else {
+            // Default to level environment (ServerEnvironment)
+            const env = new ServerEnvironment(this.worldSeed);
+            env.boundary = this.boundary;
+            return env;
+        }
+    }
+
+    // Utility: simple deterministic RNG seeded by room seed and chest id
+    _rng(seed) {
+        let s = Math.max(1, Math.floor(seed) % 2147483647);
+        return () => { s = (s * 16807) % 2147483647; return (s - 1) / 2147483646; };
+    }
+
+    _hashChestId(id) {
+        let h = 0; for (let i = 0; i < String(id).length; i++) { h = ((h << 5) - h) + String(id).charCodeAt(i); h |= 0; }
+        return Math.abs(h);
+    }
+
+    _generateBrownDrops(chestId) {
+        const labels = ['+MovSpd','+AtkSpd','+AtkPwr','+Armor','+HP','+Stm','+CritChan','+CritDmg'];
+        const rarities = [
+            { name: 'Common', color: '#ffffff' },
+            { name: 'Uncommon', color: '#2ecc71' },
+            { name: 'Rare', color: '#4da3ff' },
+            { name: 'Epic', color: '#b26aff' },
+            { name: 'Legendary', color: '#ffa64d' }
+        ];
+        // Seed RNG with room seed + chest hash
+        const seed = (this.worldSeed || 1) + this._hashChestId(chestId);
+        const rnd = this._rng(seed);
+        const picks = [];
+        const count = 10;
+        for (let i = 0; i < count; i++) {
+            const lab = labels[Math.floor(rnd() * labels.length)];
+            const rPick = rnd();
+            let rarityIdx = 0; // weighted
+            if (rPick < 0.50) rarityIdx = 0; else if (rPick < 0.75) rarityIdx = 1; else if (rPick < 0.90) rarityIdx = 2; else if (rPick < 0.98) rarityIdx = 3; else rarityIdx = 4;
+            const rar = rarities[rarityIdx];
+            picks.push({ label: lab, rarityName: rar.name, color: rar.color });
+        }
+        return picks;
+    }
+
+    startChestOpening(socketId, data) {
+        const id = data.chestId || `${Math.round(data.x)},${Math.round(data.y)}`;
+        let chest = this.chests.get(id);
+        if (!chest) {
+            chest = { id, x: data.x || 0, y: data.y || 0, variant: data.variant || 'brown', opening: false, opened: false, timeTotal: 10.0, timeLeft: 0, startedBy: null, drops: [] };
+            this.chests.set(id, chest);
+        }
+        if (chest.opened || chest.opening) return;
+        if (chest.variant === 'brown') {
+            // Immediate open, server-authoritative drops
+            chest.opened = true;
+            chest.opening = false;
+            chest.drops = this._generateBrownDrops(id);
+            
+            // Create server-tracked ground items for chest loot (same as inventory drops)
+            const groundItems = [];
+            const base = this._rng((this.worldSeed || 1) + this._hashChestId(id))(); // Use seeded RNG for physics
+            for (let i = 0; i < chest.drops.length; i++) {
+                const drop = chest.drops[i];
+                const itemId = `chest_${id}_${i}`;
+                const ang = base * 2 * Math.PI + (i * (2 * Math.PI / Math.max(1, chest.drops.length)));
+                
+                // Find a clear position for this chest loot item
+                const pos = this.findClearGroundPosition(chest.x, chest.y, ang);
+                
+                const groundItem = {
+                    id: itemId,
+                    x: pos.x,
+                    y: pos.y,
+                    vx: 0,
+                    vy: 0,
+                    label: drop.label,
+                    rarityName: drop.rarityName,
+                    color: drop.color
+                };
+                
+                this.groundItems.set(itemId, groundItem);
+                groundItems.push(groundItem);
+            }
+            
+            io.to(this.id).emit('chestOpened', { 
+                id: chest.id, 
+                x: chest.x, 
+                y: chest.y, 
+                variant: chest.variant, 
+                drops: chest.drops,
+                groundItems: groundItems 
+            });
+        } else {
+            // Gold chest: start timer and broadcast updates
+            chest.opening = true;
+            chest.opened = false;
+            chest.timeTotal = Number.isFinite(data.timeTotal) ? data.timeTotal : 10.0;
+            chest.timeLeft = chest.timeTotal;
+            chest.startedBy = socketId;
+            io.to(this.id).emit('chestTimerUpdate', { id: chest.id, x: chest.x, y: chest.y, variant: chest.variant, started: true, timeLeft: chest.timeLeft, timeTotal: chest.timeTotal, startedBy: socketId });
+        }
+    }
+    
+    addPlayer(socket, playerData) {
+        const player = {
+            id: socket.id,
+            x: playerData.x || 0,
+            y: playerData.y || 0,
+            radius: playerData.radius || 20,
+            speed: playerData.speed || 220,
+            health: playerData.health || 100,
+            healthMax: playerData.healthMax || 100,
+            aimAngle: 0,
+            lastInput: null,
+            socket: socket,
+            // Server-authoritative stamina system
+            stamina: 100,
+            staminaMax: 100,
+            staminaDrainPerSecond: 10,
+            staminaRechargePerSecond: 20,
+            exhaustionTimer: 0,
+            exhaustionCooldownSeconds: 4,
+            mustReleaseShift: false,
+            mustReleaseFire: false,
+            isFiringWeapon4: false
+        };
+        
+        // FIXED: Players should join the room's current scene, not override it
+        // Room scene is controlled by ready timer and explicit scene changes only
+        // No individual player can override the room's scene during join
+        
+        // Note: Player joins the room's current scene and boundary
+        console.log(`Player ${socket.id} joining room ${this.id} (scene: ${this.scene}, boundary: ${this.boundary})`);
+        
+        // Ensure environment boundary matches room boundary (server authority)
+        if (this.environment) {
+            this.environment.boundary = this.boundary;
+        }
+        
+        this.players.set(socket.id, player);
+        console.log(`Player ${socket.id} joined room ${this.id} (scene: ${this.scene}, boundary: ${this.boundary})`);
+        
+        // Send world seed immediately to new player for synchronized world generation
+        socket.emit('worldSeed', { seed: this.worldSeed });
+        console.log(`[SEED] Sent world seed ${this.worldSeed} to player ${socket.id} in room ${this.id}`);
+        
+        // Auto-create target dummy if in lobby scene and none exists
+        if (this.scene === 'lobby' && !this.targetDummy) {
+            console.log(`[TARGET_DUMMY] Auto-creating target dummy for lobby`);
+            this.createTargetDummy();
+        }
+        
+        // Auto-spawn ambient NPCs if in lobby scene and none exist
+        if (this.scene === 'lobby' && this.ambientNpcs.length === 0) {
+            console.log(`[AMBIENT_NPCs] Auto-spawning ambient NPCs for lobby`);
+            this.spawnLobbyAmbientNpcs();
+        }
+        
+        // Send full room snapshot and initial game state to new player
+        this.sendRoomSnapshot(socket);
+        socket.emit('gameState', this.getGameState());
+        
+        // Notify other players of new player
+        socket.to(this.id).emit('playerJoined', {
+            id: socket.id,
+            x: player.x,
+            y: player.y,
+            radius: player.radius,
+            health: player.health,
+            healthMax: player.healthMax
+        });
+    }
+    
+    removePlayer(socketId) {
+        if (this.players.has(socketId)) {
+            this.players.delete(socketId);
+            console.log(`Player ${socketId} left room ${this.id}`);
+
+            // Notify other players
+            io.to(this.id).emit('playerLeft', { id: socketId });
+
+            // Clean up room if empty
+            if (this.players.size === 0) {
+                this.cleanup();
+                rooms.delete(this.id);
+            }
+        }
+    }
+
+    updatePlayerInput(socketId, input) {
+        const player = this.players.get(socketId);
+        if (player) {
+            serverDebugger.playerInput(socketId, input);
+            // Debug: Track input with enhanced movement debugging
+            serverDebugger.serverMovementInput(socketId, input, Date.now());
+            player.lastInput = {
+                ...input,
+                timestamp: Date.now()
+            };
+        }
+    }
+    
+    tick() {
+        const tickStart = typeof process.hrtime === 'function' ? (typeof process.hrtime.bigint === 'function' ? process.hrtime.bigint() : process.hrtime()) : null;
+        const now = Date.now();
+        const deltaTime = (now - this.lastTick) / 1000;
+        this.lastTick = now;
+        this.tickCount++;
+        
+        // Update ready timer if active
+        this.updateReadyTimer(deltaTime);
+        
+        // Update target dummy if exists
+        this.updateTargetDummy(deltaTime);
+        
+        // Update player stamina and positions based on input
+        for (const [id, player] of this.players) {
+            if (player.lastInput) {
+                this.updatePlayerStamina(player, player.lastInput, deltaTime);
+                this.updatePlayerMovement(player, player.lastInput, deltaTime);
+            }
+        }
+
+        // Update gold chest timers
+        for (const chest of this.chests.values()) {
+            if (chest.opening && !chest.opened && chest.variant !== 'brown') {
+                chest.timeLeft -= deltaTime;
+                if (chest.timeLeft < 0) chest.timeLeft = 0;
+                io.to(this.id).emit('chestTimerUpdate', { id: chest.id, x: chest.x, y: chest.y, variant: chest.variant, started: chest.timeLeft > 0, timeLeft: chest.timeLeft, timeTotal: chest.timeTotal, startedBy: chest.startedBy });
+                if (chest.timeLeft <= 0) {
+                    chest.opening = false;
+                    chest.opened = true;
+                    // Artifact drop descriptor (clients handle physics)
+                    io.to(this.id).emit('chestOpened', { id: chest.id, x: chest.x, y: chest.y, variant: chest.variant, artifact: { vx: 160, vy: -220 } });
+                    // Track artifact state on server for deterministic pickup/drop
+                    chest.artifactCarriedBy = null;
+                    chest.artifactPos = { x: chest.x, y: chest.y };
+                }
+            }
+        }
+
+        // Server-authoritative enemy movement (level only)
+        if (this.scene === 'level' && this.enemyNetMode === 'authoritative') {
+            this.updateEnemies(deltaTime);
+            // Update boomer pools and apply slow to players
+            this.updateBoomerPools(deltaTime);
+            const nowMs = now; // reuse timestamp from above
+            if (!Number.isFinite(this._nextEnemyBroadcastTime) || nowMs >= this._nextEnemyBroadcastTime) {
+                this.broadcastEnemiesState();
+                this._nextEnemyBroadcastTime = nowMs + this._enemyBroadcastIntervalMs;
+            }
+        }
+
+        let tickDurationMs = 0;
+        if (tickStart !== null) {
+            if (typeof tickStart === 'bigint' && typeof process.hrtime.bigint === 'function') {
+                tickDurationMs = Number(process.hrtime.bigint() - tickStart) / 1e6;
+            } else if (Array.isArray(tickStart) && typeof process.hrtime === 'function') {
+                const diff = process.hrtime(tickStart);
+                tickDurationMs = diff[0] * 1e3 + diff[1] / 1e6;
+            }
+        }
+        serverDebugger.roomTickTiming(this.id, deltaTime, tickDurationMs, TICK_RATE);
+    }
+    
+    updateBoomerPools(deltaTime) {
+        try {
+            if (!Array.isArray(this.boomerPools) || this.boomerPools.length === 0) {
+                // Even if no pools, ensure slowed state decays to zero and clears when dead
+                for (const [, p] of this.players) {
+                    if (!p) continue;
+                    if (p.health != null && p.health <= 0) {
+                        if (p._svSlowTimer && p._svSlowTimer > 0) p._svSlowTimer = 0;
+                    } else if (p._svSlowTimer && p._svSlowTimer > 0) {
+                        p._svSlowTimer = Math.max(0, p._svSlowTimer - deltaTime);
+                    }
+                    const prev = !!p._svSlowed;
+                    const now = (p._svSlowTimer || 0) > 0;
+                    if (prev !== now) {
+                        p._svSlowed = now;
+                        io.to(this.id).emit('playerSlowState', { playerId: p.id, slowed: now });
+                    }
+                }
+                return;
+            }
+            // Decay pools
+            for (let i = this.boomerPools.length - 1; i >= 0; i--) {
+                const pool = this.boomerPools[i];
+                pool.ttl -= deltaTime;
+                if (pool.ttl <= 0) this.boomerPools.splice(i, 1);
+            }
+            // Apply slow when inside any pool; persist for 4s after leaving
+            for (const [, p] of this.players) {
+                if (!p) continue;
+                // Death clears immediately
+                if (p.health != null && p.health <= 0) {
+                    if (p._svSlowTimer && p._svSlowTimer > 0) p._svSlowTimer = 0;
+                } else {
+                    let inAny = false;
+                    const pr = p.radius || 20;
+                    for (let i = 0; i < this.boomerPools.length; i++) {
+                        const pool = this.boomerPools[i];
+                        const dx = (p.x || 0) - pool.x;
+                        const dy = (p.y || 0) - pool.y;
+                        const r = (pool.radius || 100) + pr;
+                        if (dx*dx + dy*dy <= r*r) { inAny = true; break; }
+                    }
+                    if (inAny) p._svSlowTimer = 4.0; else if (p._svSlowTimer && p._svSlowTimer > 0) p._svSlowTimer = Math.max(0, p._svSlowTimer - deltaTime);
+                }
+                const prev = !!p._svSlowed;
+                const now = (p._svSlowTimer || 0) > 0;
+                if (prev !== now) {
+                    p._svSlowed = now;
+                    io.to(this.id).emit('playerSlowState', { playerId: p.id, slowed: now });
+                }
+            }
+        } catch (e) {
+            console.error('[Server] updateBoomerPools error:', e && e.stack ? e.stack : String(e));
+        }
+    }
+    
+    updatePlayerStamina(player, input, deltaTime) {
+        // Countdown exhaustion timer regardless of input
+        if (player.exhaustionTimer > 0) {
+            player.exhaustionTimer -= deltaTime;
+            if (player.exhaustionTimer < 0) player.exhaustionTimer = 0;
+        }
+        
+        // Calculate movement and sprint state
+        const isMoving = input.keys.KeyW || input.keys.KeyS || input.keys.KeyA || input.keys.KeyD;
+        const wantsSprint = input.keys.ShiftLeft || input.keys.ShiftRight;
+        const staminaDrainThisFrame = player.staminaDrainPerSecond * deltaTime;
+        const tryingToSprint = wantsSprint && isMoving && !player.mustReleaseShift;
+        const canSprint = tryingToSprint && (player.stamina > staminaDrainThisFrame) && (player.exhaustionTimer === 0);
+        
+        // Store server sprint state for movement calculations
+        player.serverSprintActive = canSprint;
+        
+        if (canSprint) {
+            // Drain stamina while sprinting
+            player.stamina -= staminaDrainThisFrame;
+            if (player.stamina <= 0) {
+                player.stamina = 0;
+                player.mustReleaseShift = true; // lock sprint until Shift is released
+                player.exhaustionTimer = player.exhaustionCooldownSeconds; // start exhaustion delay
+            }
+        }
+        // Additional drain when firing weapon 4 (implement later if needed)
+        else if (tryingToSprint && player.stamina > 0 && player.stamina <= staminaDrainThisFrame) {
+            // Attempting to sprint with too little stamina: trigger exhaustion
+            player.stamina = 0;
+            player.mustReleaseShift = true;
+            player.exhaustionTimer = player.exhaustionCooldownSeconds;
+        } else {
+            // Only recharge when Shift is NOT held
+            if (!wantsSprint && !player.isFiringWeapon4) {
+                // Wait for exhaustion to end before recharging
+                if (player.exhaustionTimer === 0) {
+                    player.stamina += player.staminaRechargePerSecond * deltaTime;
+                    if (player.stamina > player.staminaMax) player.stamina = player.staminaMax;
+                    // Clear latch once Shift is released and stamina is > 0
+                    if (player.mustReleaseShift && player.stamina > 0) player.mustReleaseShift = false;
+                    if (player.mustReleaseFire && player.stamina > 0) player.mustReleaseFire = false;
+                }
+            }
+        }
+    }
+    
+    updatePlayerMovement(player, input, deltaTime) {
+        const speed = player.speed;
+        let vx = 0, vy = 0;
+        
+        // Store position before movement for debugging
+        const beforePos = { x: player.x, y: player.y };
+        
+        // Handle WASD movement
+        if (input.keys.KeyW) vy -= 1;
+        if (input.keys.KeyS) vy += 1;
+        if (input.keys.KeyA) vx -= 1;
+        if (input.keys.KeyD) vx += 1;
+        
+        // Normalize diagonal movement
+        if (vx !== 0 && vy !== 0) {
+            const mag = Math.sqrt(vx * vx + vy * vy);
+            vx /= mag;
+            vy /= mag;
+        }
+        
+        // Use server-authoritative sprint state from stamina system
+        const sprinting = player.serverSprintActive || false;
+        let actualSpeed = sprinting ? speed * 2 : speed;
+        
+        // Apply boomer puke pool slow (50% speed reduction)
+        if (player._svSlowed) {
+            actualSpeed *= 0.5;
+        }
+        
+        // Calculate movement delta
+        const dx = vx * actualSpeed * deltaTime;
+        const dy = vy * actualSpeed * deltaTime;
+        const intendedPos = { x: player.x + dx, y: player.y + dy };
+        
+        // Apply collision detection using server environment (must match client exactly)
+        if (this.environment && this.environment.resolveCircleMove && (dx !== 0 || dy !== 0)) {
+            const radius = player.radius || 26; // Default player radius
+            const resolved = this.environment.resolveCircleMove(player.x, player.y, radius, dx, dy);
+            
+            // Debug: Track collision detection
+            serverDebugger.serverCollisionDetection(
+                player.id, 
+                beforePos, 
+                intendedPos, 
+                resolved, 
+                this.scene,
+                this.environment.obstacles?.length || 0
+            );
+            
+            player.x = resolved.x;
+            player.y = resolved.y;
+        } else {
+            // Fallback: direct movement without collision (shouldn't happen in normal gameplay)
+            player.x += dx;
+            player.y += dy;
+            
+            // Basic boundary enforcement as fallback
+            const boundary = this.boundary;
+            player.x = Math.max(-boundary, Math.min(boundary, player.x));
+            player.y = Math.max(-boundary, Math.min(boundary, player.y));
+        }
+        
+        // Debug: Track final movement calculation
+        const afterPos = { x: player.x, y: player.y };
+        serverDebugger.serverMovementCalculation(player.id, beforePos, afterPos, deltaTime, input, sprinting);
+        
+        // Update aim angle
+        if (typeof input.aimAngle === 'number') {
+            player.aimAngle = input.aimAngle;
+        }
+    }
+    
+    getGameState() {
+        const players = [];
+        let maxInputSeq = 0;
+
+        for (const [id, player] of this.players) {
+            players.push({
+                id: player.id,
+                x: player.x,
+                y: player.y,
+                radius: player.radius,
+                health: player.health,
+                healthMax: player.healthMax,
+                aimAngle: player.aimAngle,
+                stamina: player.stamina,
+                staminaMax: player.staminaMax,
+                exhaustionTimer: player.exhaustionTimer,
+                mustReleaseShift: player.mustReleaseShift,
+                serverSprintActive: player.serverSprintActive || false
+            });
+            if (player.lastInput && player.lastInput.sequence > maxInputSeq) {
+                maxInputSeq = player.lastInput.sequence;
+            }
+        }
+
+        return {
+            tick: this.tickCount,
+            timestamp: Date.now(),
+            players,
+            lastProcessedInputSeq: maxInputSeq
+        };
+    }
+    
+    broadcastGameState() {
+        if (this.players.size > 0) {
+            const gameState = this.getGameState();
+            serverDebugger.gameStateUpdate(this.id, this.players.size, this.tickCount);
+
+            let payloadBytes = 0;
+            if (typeof Buffer !== 'undefined' && typeof Buffer.byteLength === 'function') {
+                try {
+                    payloadBytes = Buffer.byteLength(JSON.stringify(gameState), 'utf8');
+                } catch (err) {
+                    serverDebugger.warn('NETWORKING', `[NET] Failed to measure payload for room ${this.id}`, {
+                        error: err && err.message ? err.message : String(err)
+                    });
+                }
+            }
+
+            io.to(this.id).emit('gameState', gameState);
+            serverDebugger.roomBroadcast(this.id, this.players.size, payloadBytes);
+        }
+    }
+    
+    // Find a clear position for a ground item, avoiding overlap with existing items
+    findClearGroundPosition(baseX, baseY, angle, itemRadius = 12, maxAttempts = 20) {
+        const minSpacing = itemRadius * 2 + 6; // 30px for 12px radius items
+        let radius = 60; // Start with reasonable distance from drop point
+        let currentAngle = angle;
+        
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            const x = baseX + Math.cos(currentAngle) * radius;
+            const y = baseY + Math.sin(currentAngle) * radius;
+            
+            // Check boundaries
+            if (x < -this.boundary || x > this.boundary || y < -this.boundary || y > this.boundary) {
+                radius += 20;
+                continue;
+            }
+            
+            // Check overlap with existing ground items
+            let overlaps = false;
+            for (const existingItem of this.groundItems.values()) {
+                const dx = x - existingItem.x;
+                const dy = y - existingItem.y;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                if (distance < minSpacing) {
+                    overlaps = true;
+                    break;
+                }
+            }
+            
+            if (!overlaps) {
+                return { x, y };
+            }
+            
+            // Try next position: increment angle slightly and increase radius if needed
+            currentAngle += 0.3; // ~17 degrees
+            if (attempt % 6 === 5) radius += 20; // Expand search radius every 6 attempts
+        }
+        
+        // Fallback: return position even if overlapping (better than infinite loop)
+        return { x: baseX + Math.cos(angle) * radius, y: baseY + Math.sin(angle) * radius };
+    }
+    
+    startReadyTimer(startedByPlayerId) {
+        // Only start in lobby; ignore if already running or completed
+        if (this.scene !== 'lobby') return;
+        if (this.readyTimer.started || this.readyTimer.completed) return;
+        this.readyTimer.started = true;
+        this.readyTimer.completed = false;
+        this.readyTimer.timeLeft = Number.isFinite(this.readyTimer.timeTotal) ? this.readyTimer.timeTotal : 10.0;
+        this.readyTimer.startedBy = startedByPlayerId || null;
+        console.log(`[Server] Ready timer started in room ${this.id} by ${startedByPlayerId}`);
+        this.emitReadyTimerState();
+    }
+
+    cancelReadyTimer() {
+        if (!this.readyTimer.started || this.readyTimer.completed) return;
+        this.readyTimer.started = false;
+        this.readyTimer.timeLeft = 0;
+        this.readyTimer.startedBy = null;
+        console.log(`[Server] Ready timer cancelled in room ${this.id}`);
+        this.emitReadyTimerState();
+    }
+    
+    updateReadyTimer(deltaTime) {
+        if (!this.readyTimer.started || this.readyTimer.completed) return;
+
+        this.readyTimer.timeLeft -= deltaTime;
+        if (this.readyTimer.timeLeft < 0) this.readyTimer.timeLeft = 0;
+
+        this.emitReadyTimerState();
+
+        if (this.readyTimer.timeLeft <= 0) {
+            this.readyTimer.timeLeft = 0;
+            this.readyTimer.started = false;
+            this.readyTimer.completed = true;
+            console.log(`[Server] Ready timer completed in room ${this.id}`);
+
+            this.scene = 'level';
+            this.boundary = 11000;
+
+            this.environment = this._createEnvironmentForScene(this.scene);
+            console.log(`[READY_TIMER] Recreated server environment for level: ${this.environment.obstacles.length} obstacles, boundary: ${this.boundary}`);
+
+            // Enable server-authoritative enemy movement when level starts
+            this.enemyNetMode = 'authoritative';
+            this._nextEnemyBroadcastTime = Date.now();
+
+            // Compute and cache level spawns (server-authoritative)
+            this.levelSpawns = this._computeLevelSpawns();
+
+            // Compute server-authoritative enemy spawns
+            const enemyList = this._computeEnemySpawns();
+            this.enemies.clear();
+            for (let i = 0; i < enemyList.length; i++) {
+                const e = enemyList[i];
+                // Attach baseline attributes per type for server-authoritative movement/behavior
+                if (e.type === 'boomer') {
+                    e.radius = 32;
+                    e.speedMul = 1.25;
+                    e.preferContact = true;
+                    e.avoidObstaclesAggressively = true;
+                    e.preferOpenSpaces = true;
+                    e.healthMax = 220;
+                    e.health = 220;
+                    e.alive = true;
+                } else if (e.type === 'projectile') {
+                    e.radius = 26;
+                    e.speedMul = 1.0;
+                    e.preferContact = false;
+                    e.healthMax = 100;
+                    e.health = 100;
+                    e.alive = true;
+                } else {
+                    // basic
+                    e.radius = 26;
+                    e.speedMul = 1.0;
+                    e.preferContact = true;
+                    e.healthMax = 100;
+                    e.health = 100;
+                    e.alive = true;
+                }
+                this.enemies.set(e.id, e);
+            }
+
+            io.to(this.id).emit('sceneChange', {
+                scene: 'level',
+                boundary: 11000,
+                fromPlayer: 'SERVER_TIMER',
+                obstacles: this.environment.obstacles,
+                levelSpawns: this.levelSpawns,
+                enemies: enemyList
+            });
+            console.log(`[READY_TIMER] Sent ${this.environment.obstacles.length} obstacles to all clients`);
+
+            setTimeout(() => {
+                this.readyTimer.completed = false;
+                this.readyTimer.startedBy = null;
+                this.emitReadyTimerState();
+            }, 1000);
+        }
+    }
+    
+    // Compute server-authoritative chest and NPC placements for level scene
+    _computeLevelSpawns() {
+        try {
+            if (this.scene !== 'level' || !this.environment) return null;
+            const env = this.environment;
+            const rng = new SeededRNG(this.worldSeed);
+            const clearance = 28;
+            const chests = [];
+            let goldX = null, goldY = null;
+            // Preferred test location near center
+            const testX = 200;
+            const testY = 150;
+            const isClear = (x, y, r) => env.isInsideBounds(x, y, r) && !env.circleHitsAny(x, y, r);
+            if (isClear(testX, testY, clearance)) {
+                goldX = testX; goldY = testY;
+            } else {
+                const tries = 300;
+                for (let i = 0; i < tries; i++) {
+                    const ang = rng.randomFloat(0, Math.PI * 2);
+                    const dist = 100 + rng.randomFloat(0, 300);
+                    const nx = Math.cos(ang) * dist;
+                    const ny = Math.sin(ang) * dist;
+                    if (isClear(nx, ny, clearance)) { goldX = nx; goldY = ny; break; }
+                }
+            }
+            if (goldX == null || goldY == null) return null;
+            // Push gold chest
+            chests.push({ id: `${Math.round(goldX)},${Math.round(goldY)}`, x: goldX, y: goldY, variant: 'gold' });
+            // Brown chest near gold using seeded RNG
+            for (let j = 0; j < 200; j++) {
+                const ang2 = rng.randomFloat(0, Math.PI * 2);
+                const d2 = 120 + rng.randomFloat(0, 180);
+                const nx2 = goldX + Math.cos(ang2) * d2;
+                const ny2 = goldY + Math.sin(ang2) * d2;
+                if (isClear(nx2, ny2, clearance)) {
+                    chests.push({ id: `${Math.round(nx2)},${Math.round(ny2)}`, x: nx2, y: ny2, variant: 'brown' });
+                    break;
+                }
+            }
+            // Spawn two NPCs near chest (types are labels for client)
+            const npcs = [];
+            const maxDist = 500;
+            const npcR = 24;
+            const triesNpc = 700;
+            let placedA = false, placedB = false;
+            for (let t = 0; t < triesNpc && (!placedA || !placedB); t++) {
+                const ang = rng.randomFloat(0, Math.PI * 2);
+                const dist = rng.randomFloat(0, maxDist);
+                const tx = goldX + Math.cos(ang) * dist;
+                const ty = goldY + Math.sin(ang) * dist;
+                if (!isClear(tx, ty, npcR)) continue;
+                // avoid overlapping any chest
+                let okChest = true;
+                for (let k = 0; k < chests.length; k++) {
+                    const c = chests[k];
+                    const cr = 20;
+                    const dx = tx - c.x, dy = ty - c.y;
+                    if (dx*dx + dy*dy <= (cr + npcR + 6) * (cr + npcR + 6)) { okChest = false; break; }
+                }
+                if (!okChest) continue;
+                // avoid overlapping prior npc
+                let okNpc = true;
+                for (let k = 0; k < npcs.length; k++) {
+                    const n = npcs[k];
+                    const dx = tx - n.x, dy = ty - n.y;
+                    if (dx*dx + dy*dy <= (npcR + (n.radius||24) + 6) * (npcR + (n.radius||24) + 6)) { okNpc = false; break; }
+                }
+                if (!okNpc) continue;
+                if (!placedA) { npcs.push({ type: 'NPC_A', x: tx, y: ty, radius: npcR }); placedA = true; continue; }
+                if (!placedB) { npcs.push({ type: 'NPC_B', x: tx, y: ty, radius: npcR }); placedB = true; continue; }
+            }
+            return { chests, npcs };
+        } catch (e) {
+            console.error('[Server] Failed to compute level spawns:', e);
+            return null;
+        }
+    }
+    
+    // Server-side enemy spawn computation (positions only)
+    _computeEnemySpawns() {
+        try {
+            if (this.scene !== 'level' || !this.environment) return [];
+            const env = this.environment;
+            const rng = new SeededRNG(this.worldSeed + 777); // separate stream for enemies
+            const max = env.maxRange || 10000;
+            const enemyRadius = 26;
+            const triesPerEnemy = 40;
+            const totalCount = 800; // tune as needed
+
+            const list = [];
+            const sx = env.spawnSafeX || 0, sy = env.spawnSafeY || 0;
+            const halfSafe = 750;
+
+            const isClear = (x, y) => {
+                if (!env.isInsideBounds(x, y, enemyRadius)) return false;
+                if (env.circleHitsAny && env.circleHitsAny(x, y, enemyRadius)) return false;
+                if (Math.abs(x - sx) <= halfSafe + enemyRadius && Math.abs(y - sy) <= halfSafe + enemyRadius) return false;
+                return true;
+            };
+
+            for (let n = 0; n < totalCount; n++) {
+                let placed = false;
+                for (let t = 0; t < triesPerEnemy && !placed; t++) {
+                    const x = rng.randomFloat(-max, max);
+                    const y = rng.randomFloat(-max, max);
+                    if (isClear(x, y)) {
+                        const id = `enemy_${this.nextEnemyId++}`;
+                        // Mix enemy types: projectile (~15%), boomer (~10%), otherwise basic
+                        const roll = rng.random();
+                        let type = 'basic';
+                        if (roll < 0.15) type = 'projectile';
+                        else if (roll < 0.25) type = 'boomer';
+                        list.push({ id, x, y, type });
+                        placed = true;
+                    }
+                }
+            }
+            return list;
+        } catch (e) {
+            console.error('[Server] Failed to compute enemy spawns:', e);
+            return [];
+        }
+    }
+
+    // Server-driven enemy movement using per-player Directors (nearest-player grouping)
+    updateEnemies(deltaTime) {
+        try {
+            if (!DirectorClass) return;
+            if (!this.environment) return;
+            if (this.players.size === 0) return;
+            if (!this.enemies || this.enemies.size === 0) return;
+
+            // Build groups of enemies by nearest player
+            const groups = new Map(); // playerId -> wrapper enemy array
+            for (const [pid] of this.players) groups.set(pid, []);
+
+            for (const e of this.enemies.values()) {
+                if (!e) continue;
+                if (e.alive === false) continue;
+                // Stable numeric id for Director logic (ring/jitter depend on numeric id semantics)
+                let numId = this._enemyIdMap.get(e.id);
+                if (!numId) { numId = this._enemyIdCounter++; this._enemyIdMap.set(e.id, numId); }
+
+                // Wrap enemy into a lightweight object used by Director
+                const wrapped = {
+                    id: numId,
+                    x: Number.isFinite(e.x) ? e.x : 0,
+                    y: Number.isFinite(e.y) ? e.y : 0,
+                    radius: Number.isFinite(e.radius) ? e.radius : 26,
+                    alive: e.alive !== false,
+                    speedMul: Number.isFinite(e.speedMul) ? e.speedMul : 1,
+                    preferContact: e.preferContact !== false,
+                    kbTime: Number.isFinite(e.kbTime) ? e.kbTime : 0,
+                    kbVelX: Number.isFinite(e.kbVelX) ? e.kbVelX : 0,
+                    kbVelY: Number.isFinite(e.kbVelY) ? e.kbVelY : 0,
+                    _ref: e
+                };
+
+                // Find nearest player
+                let closest = null; let bestD2 = Infinity;
+                for (const [, p] of this.players) {
+                    const dx = (p.x || 0) - (wrapped.x || 0);
+                    const dy = (p.y || 0) - (wrapped.y || 0);
+                    const d2 = dx*dx + dy*dy;
+                    if (d2 < bestD2) { bestD2 = d2; closest = p; }
+                }
+                if (!closest) continue;
+                const arr = groups.get(closest.id);
+                if (arr) arr.push(wrapped);
+            }
+
+            // Run a Director per player on that player's group of enemies
+            for (const [pid, arr] of groups) {
+                if (!arr || arr.length === 0) continue;
+                const playerRef = this.players.get(pid);
+                if (!playerRef) continue;
+
+                let dir = this._enemyDirectors.get(pid);
+                if (!dir) {
+                    const listObj = { items: arr, queryCircle: (cx, cy, r) => arr.filter(o => {
+                        const dx = (o.x - cx); const dy = (o.y - cy); return (dx*dx + dy*dy) <= r*r;
+                    }) };
+                    dir = new DirectorClass(listObj, this.environment, playerRef);
+                    this._enemyDirectors.set(pid, dir);
+                }
+                // Keep references fresh each tick
+                dir.enemies = { items: arr, queryCircle: (cx, cy, r) => arr.filter(o => {
+                    const dx = (o.x - cx); const dy = (o.y - cy); return (dx*dx + dy*dy) <= r*r;
+                }) };
+                dir.environment = this.environment;
+                dir.player = playerRef;
+                // Update movement for this group
+                dir.update(deltaTime);
+
+                // Write back updated positions to authoritative enemy objects
+                for (let i = 0; i < arr.length; i++) {
+                    const w = arr[i];
+                    if (!w || !w._ref) continue;
+                    w._ref.x = w.x;
+                    w._ref.y = w.y;
+                }
+
+                // Server-authoritative ranged firing for projectile-type enemies in this group
+                const now = Date.now();
+                for (let i = 0; i < arr.length; i++) {
+                    const w = arr[i];
+                    const e = w && w._ref; if (!e) continue;
+                    // Boomer arming/detonation near target (server-authoritative)
+                    if (e.type === 'boomer' && e.alive !== false) {
+                        // Track arming timer when very close
+                        const px = Number(playerRef.x) || 0;
+                        const py = Number(playerRef.y) || 0;
+                        const dx = px - e.x;
+                        const dy = py - e.y;
+                        const dist = Math.hypot(dx, dy) || 1;
+                        const armDist = Math.max(40, (playerRef.radius || 26) + (e.radius || 26) + 18);
+                        if (dist < armDist && !e._armedTimerStarted) {
+                            e._armedTimerStarted = true;
+                            e._armedTimer = 0.1; // short fuse once inside arm distance
+                        }
+                        if (e._armedTimerStarted && typeof e._armedTimer === 'number' && e._armedTimer > 0) {
+                            e._armedTimer -= deltaTime;
+                            if (e._armedTimer <= 0) {
+                                // Detonate once
+                                e._armedTimer = 0;
+                                // Broadcast explosion VFX and pooled puddle creation
+                                io.to(this.id).emit('boomerExploded', { id: e.id, x: e.x, y: e.y });
+                                // Register authoritative pool (lasts ~8s, radius ~100)
+                                try { this.boomerPools.push({ x: e.x, y: e.y, radius: 100, ttl: 8.0 }); } catch(_) {}
+                                // Apply explosion damage to nearby players (server-authoritative)
+                                const blastRadius = 100;
+                                const inner = 20;
+                                for (const [, p] of this.players) {
+                                    if (!p) continue;
+                                    const dxp = (p.x || 0) - e.x;
+                                    const dyp = (p.y || 0) - e.y;
+                                    const dp = Math.hypot(dxp, dyp);
+                                    if (dp <= blastRadius + (p.radius || 0)) {
+                                        // Respect invincibility if synced
+                                        if (p.invincible === true) continue;
+                                        const outer = blastRadius;
+                                        let tp = (dp - inner) / Math.max(1e-6, (outer - inner));
+                                        tp = Math.max(0, Math.min(1, tp));
+                                        const dmg = 95 - 75 * tp;
+                                        p.health = Math.max(0, (p.health || 0) - dmg);
+                                        // Broadcast health to player and room
+                                        try { p.socket.emit('playerHealth', { health: p.health, from: 'boomer' }); } catch(_) {}
+                                        io.to(this.id).emit('playerHealthUpdate', { playerId: p.id, health: p.health });
+                                    }
+                                }
+                                // Kill boomer server-side and remove from map
+                                e.alive = false;
+                                this.enemies.delete(e.id);
+                                // Continue to next enemy
+                                continue;
+                            }
+                        }
+                    }
+                    if (e.type !== 'projectile') continue; // only ranged variant
+                    // Initialize server-side fire timers
+                    if (typeof e._svFireCooldown !== 'number') e._svFireCooldown = 0;
+                    e._svFireCooldown -= deltaTime;
+                    // Target current group's player
+                    const px = Number(playerRef.x) || 0;
+                    const py = Number(playerRef.y) || 0;
+                    const dx = px - e.x;
+                    const dy = py - e.y;
+                    const dist = Math.hypot(dx, dy) || 1;
+                    let wantFire = dist >= 200 && dist <= 900;
+                    if (wantFire && this.environment && typeof this.environment.lineHitsAny === 'function') {
+                        const losBlocked = this.environment.lineHitsAny(e.x, e.y, px, py);
+                        if (losBlocked) wantFire = false;
+                    }
+                    if (!wantFire || e._svFireCooldown > 0) continue;
+                    // Compute projectile
+                    const ang = Math.atan2(dy, dx);
+                    const base = 80; // matches client base 80
+                    const spd = 2 * base * (dir.speedByMode?.[dir.mode] ?? 1) * (Number.isFinite(e.speedMul) ? e.speedMul : 1);
+                    const vx = Math.cos(ang) * spd;
+                    const vy = Math.sin(ang) * spd;
+                    const r = 6;
+                    const life = 6.0;
+                    const color = '#7adf7a';
+                    const sx = e.x + Math.cos(ang) * ((e.radius || 26) + r + 2);
+                    const sy = e.y + Math.sin(ang) * ((e.radius || 26) + r + 2);
+                    // Broadcast to all players in room
+                    io.to(this.id).emit('enemyProjectileFired', {
+                        enemyId: e.id,
+                        x: sx,
+                        y: sy,
+                        vx,
+                        vy,
+                        radius: r,
+                        color,
+                        life,
+                        angle: ang,
+                        damage: 18
+                    });
+                    // Randomize next cooldown similar to client 1.2..2.0s
+                    const cd = 1.2 + Math.random() * 0.8;
+                    e._svFireCooldown = cd;
+                }
+            }
+        } catch (e) {
+            console.error('[Server] updateEnemies error:', e && e.stack ? e.stack : String(e));
+        }
+    }
+    _getEnemiesStatePayload() {
+        const out = [];
+        for (const e of this.enemies.values()) {
+            out.push({ id: e.id, x: e.x, y: e.y });
+        }
+        return out;
+    }
+    broadcastEnemiesState() {
+        io.to(this.id).emit('enemiesState', this._getEnemiesStatePayload());
+    }
+    // Ambient NPC management methods
+    spawnLobbyAmbientNpcs() {
+        // Only create ambient NPCs if in lobby scene
+        if (this.scene !== 'lobby') {
+            return;
+        }
+
+        // Atomic guard to prevent race condition on concurrent joins
+        if (this.ambientSpawned) {
+            return;
+        }
+        this.ambientSpawned = true;
+
+        console.log('[AMBIENT_NPCs] Spawning ambient NPCs with seeded RNG');
+
+        // Use seeded RNG for synchronized NPC placement across all players (same logic as client)
+        const rng = new SeededRNG(this.worldSeed);
+        const count = 4;
+        const tries = 1000;
+        const r = 22;
+        const placed = [];
+        
+        const isClear = (x, y) => {
+            if (!this.environment.isInsideBounds || !this.environment.circleHitsAny) return true;
+            if (!this.environment.isInsideBounds(x, y, r)) return false;
+            if (this.environment.circleHitsAny(x, y, r)) return false;
+            for (let i = 0; i < placed.length; i++) {
+                const p = placed[i];
+                const dx = x - p.x, dy = y - p.y;
+                if (dx*dx + dy*dy <= (r + p.r + 12) * (r + p.r + 12)) return false;
+            }
+            // Check against target dummy position
+            if (this.targetDummy) {
+                const dx = x - this.targetDummy.x, dy = y - this.targetDummy.y;
+                const rr = (r + (this.targetDummy.radius||32) + 12);
+                if (dx*dx + dy*dy <= rr * rr) return false;
+            }
+            return true;
+        };
+
+        const b = this.boundary - 60;
+        const inner = b - 220; // bias ring near edges
+        const clusterCenters = [];
+        
+        // Seed 2-3 cluster centers on edge-biased ring
+        const numClusters = 2 + rng.randomInt(0, 1);
+        for (let c = 0; c < numClusters; c++) {
+            const edgeSide = rng.randomInt(0, 3); // 0:top,1:right,2:bottom,3:left
+            let cx = 0, cy = 0;
+            if (edgeSide === 0) { cx = rng.randomFloat(-1, 1) * inner; cy = -inner; }
+            else if (edgeSide === 1) { cx = inner; cy = rng.randomFloat(-1, 1) * inner; }
+            else if (edgeSide === 2) { cx = rng.randomFloat(-1, 1) * inner; cy = inner; }
+            else { cx = -inner; cy = rng.randomFloat(-1, 1) * inner; }
+            // Nudge inward if obstructed
+            for (let step = 0; step < 10 && (this.environment.circleHitsAny && this.environment.circleHitsAny(cx, cy, r) || !this.environment.isInsideBounds(cx, cy, r)); step++) {
+                cx *= 0.95; cy *= 0.95;
+            }
+            clusterCenters.push({ x: cx, y: cy });
+        }
+
+        for (let k = 0; k < count; k++) {
+            let x = 0, y = 0, ok = false;
+            const useCluster = rng.random() < 0.5 && clusterCenters.length > 0;
+            if (useCluster) {
+                // Pick a cluster, sample within a small radius
+                const cc = clusterCenters[Math.floor(rng.random() * clusterCenters.length)];
+                for (let t = 0; t < tries; t++) {
+                    const ang = rng.randomFloat(0, Math.PI * 2);
+                    const dist = 40 + rng.randomFloat(0, 160); // compact cluster
+                    x = cc.x + Math.cos(ang) * dist;
+                    y = cc.y + Math.sin(ang) * dist;
+                    if (isClear(x, y)) { ok = true; break; }
+                }
+            }
+            if (!ok) {
+                // Edge-biased random placement: choose a side then sample inward
+                const edgeSide = rng.randomInt(0, 3);
+                for (let t = 0; t < tries; t++) {
+                    if (edgeSide === 0) { x = rng.randomFloat(-1, 1) * inner; y = -inner - rng.randomFloat(0, 80); }
+                    else if (edgeSide === 1) { x = inner + rng.randomFloat(0, 80); y = rng.randomFloat(-1, 1) * inner; }
+                    else if (edgeSide === 2) { x = rng.randomFloat(-1, 1) * inner; y = inner + rng.randomFloat(0, 80); }
+                    else { x = -inner - rng.randomFloat(0, 80); y = rng.randomFloat(-1, 1) * inner; }
+                    // Clamp to bounds margin
+                    x = Math.max(-b+20, Math.min(b-20, x));
+                    y = Math.max(-b+20, Math.min(b-20, y));
+                    if (isClear(x, y)) { ok = true; break; }
+                }
+            }
+            if (ok) {
+                // Calculate deterministic bark timing using seeded RNG
+                const barkSeed = this.worldSeed + k; // Unique per NPC but deterministic
+                const barkRng = new SeededRNG(barkSeed);
+                
+                // Deterministic color selection using seeded RNG (same palette as NPC_Lobby)
+                const colorPalette = ['#6e7380', '#7a6f64', '#4d5968', '#5c6b52', '#7a5f5f'];
+                const colorIndex = Math.floor(barkRng.random() * colorPalette.length);
+                const color = colorPalette[colorIndex];
+                
+                const npc = {
+                    id: `ambient_npc_${k}`,
+                    x: x,
+                    y: y,
+                    radius: 22,
+                    type: 'ambient_lobby',
+                    color: color, // Add deterministic color
+                    // Add bark synchronization data
+                    barkSeed: barkSeed,
+                    barkInterval: 2.5 * (0.8 + barkRng.randomFloat(0, 0.7)), // Same variance as client
+                    barkGap: 1.5 * (0.8 + barkRng.randomFloat(0, 0.7)),
+                    barkTimer: barkRng.random() * (2.5 + 1.5) // Initial timer offset
+                };
+                this.ambientNpcs.push(npc);
+                placed.push({ x, y, r });
+            }
+        }
+        this.broadcastAmbientNpcs();
+
+        console.log(`[AMBIENT_NPCs] Spawned ${placed.length} ambient NPCs in room ${this.id} using seed: ${this.worldSeed}`);
+    }
+
+    cleanup() {
+        this._destroyed = true;
+        if (this._tickHandle) {
+            clearTimeout(this._tickHandle);
+            this._tickHandle = null;
+        }
+        if (this._broadcastHandle) {
+            clearTimeout(this._broadcastHandle);
+            this._broadcastHandle = null;
+        }
+    }
+}
+
+// Socket.IO connection handling
+io.on('connection', (socket) => {
+    console.log(`Client connected: ${socket.id}`);
+    serverDebugger.info('NETWORKING', `Client connected: ${socket.id}`);
+    
+    socket.on('joinRoom', (data) => {
+        const roomId = data.roomId || 'default';
+        const playerData = data.playerData || {};
+        
+        console.log(`[Server] Player ${socket.id} attempting to join room ${roomId}`);
+        
+        // Leave any existing rooms
+        socket.rooms.forEach(room => {
+            if (room !== socket.id) {
+                socket.leave(room);
+            }
+        });
+        
+        // Join the new room
+        socket.join(roomId);
+        
+        // Get or create room
+        if (!rooms.has(roomId)) {
+            rooms.set(roomId, new GameRoom(roomId));
+        }
+        
+        const room = rooms.get(roomId);
+        room.addPlayer(socket, playerData);
+        
+        console.log(`[Server] Player ${socket.id} successfully joined room ${roomId}`);
+
+        // Send existing chest states to late joiner
+        for (const chest of room.chests.values()) {
+            if (chest.opening && !chest.opened) {
+                socket.emit('chestTimerUpdate', { id: chest.id, x: chest.x, y: chest.y, variant: chest.variant, started: true, timeLeft: chest.timeLeft, timeTotal: chest.timeTotal, startedBy: chest.startedBy });
+            }
+            if (chest.opened) {
+                if (chest.variant === 'brown') {
+                    socket.emit('chestOpened', { id: chest.id, x: chest.x, y: chest.y, variant: chest.variant, drops: chest.drops });
+                } else {
+                    // If artifact is currently being carried, don't spawn it for late joiner; instead inform pickup state
+                    if (chest.artifactCarriedBy) {
+                        socket.emit('chestOpened', { id: chest.id, x: chest.x, y: chest.y, variant: chest.variant });
+                        socket.emit('artifactPickedUp', { chestId: chest.id, playerId: chest.artifactCarriedBy });
+                    } else {
+                        socket.emit('chestOpened', { id: chest.id, x: chest.x, y: chest.y, variant: chest.variant, artifact: { vx: 160, vy: -220 } });
+                    }
+                }
+            }
+        }
+    });
+    
+    socket.on('playerInput', (input) => {
+        // Find which room this player is in
+        for (const [roomId, room] of rooms) {
+            if (room.players.has(socket.id)) {
+                room.updatePlayerInput(socket.id, input);
+                break;
+            }
+        }
+    });
+    
+    socket.on('playerHealthChange', (data) => {
+        // Receive health update from client and broadcast to all players in room
+        for (const [roomId, room] of rooms) {
+            if (room.players.has(socket.id)) {
+                const player = room.players.get(socket.id);
+                if (player && typeof data.health === 'number') {
+                    player.health = data.health;
+                    if (typeof data.healthMax === 'number') {
+                        player.healthMax = data.healthMax;
+                    }
+                    // Broadcast to all clients in room (including sender for consistency)
+                    io.to(roomId).emit('playerHealthUpdate', {
+                        playerId: socket.id,
+                        health: player.health,
+                        healthMax: player.healthMax
+                    });
+                }
+                break;
+            }
+        }
+    });
+
+    socket.on('chestOpenRequest', (data) => {
+        // Find which room this player is in
+        for (const [roomId, room] of rooms) {
+            if (room.players.has(socket.id)) {
+                room.startChestOpening(socket.id, data || {});
+                break;
+            }
+        }
+    });
+    
+    socket.on('sceneChange', (data) => {
+        console.log(`[Server] Player ${socket.id} changing scene to ${data.scene}`);
+        // Find which room this player is in
+        for (const [roomId, room] of rooms) {
+            if (room.players.has(socket.id)) {
+                if (data.boundary) {
+                    room.boundary = data.boundary;
+                }
+                if (data.scene && data.scene !== room.scene) {
+                    room.scene = data.scene;
+                    // Recreate environment for the new scene
+                    console.log(`[Server] Recreating environment for scene change to "${room.scene}"`);
+                    room.environment = room._createEnvironmentForScene(room.scene);
+                    console.log(`[Server] Environment recreated with ${room.environment.obstacles.length} obstacles`);
+                    // Reset or compute level spawns depending on scene
+                    if (room.scene === 'level') {
+                        room.levelSpawns = room._computeLevelSpawns();
+                    } else {
+                        room.levelSpawns = null;
+                    }
+                }
+                console.log(`[Server] Room ${roomId} updated: scene=${room.scene}, boundary=${room.boundary}`);
+                
+                // Broadcast scene change to all players in the room (including sender) with obstacle data
+                io.to(roomId).emit('sceneChange', {
+                    scene: data.scene,
+                    boundary: data.boundary,
+                    fromPlayer: socket.id,
+                    obstacles: room.environment.obstacles,  // Send server-authoritative obstacle data
+                    levelSpawns: room.levelSpawns
+                });
+                // If entering level via client-triggered scene change, enable enemy authority
+                if (room.scene === 'level') {
+                    room.enemyNetMode = 'authoritative';
+                    room._nextEnemyBroadcastTime = Date.now();
+                } else {
+                    room.enemyNetMode = 'spawnOnly';
+                }
+                console.log(`[Server] Broadcasting scene change to all players in room ${roomId}: ${data.scene}`);
+                break;
+            }
+        }
+    });
+    
+    socket.on('readyTimerStart', (data) => {
+        console.log(`[Server] Player ${socket.id} requesting to start ready timer`);
+        // Find which room this player is in
+        for (const [roomId, room] of rooms) {
+            if (room.players.has(socket.id)) {
+                room.startReadyTimer(socket.id);
+                break;
+            }
+        }
+    });
+    
+    socket.on('readyTimerCancel', (data) => {
+        console.log(`[Server] Player ${socket.id} requesting to cancel ready timer`);
+        // Find which room this player is in
+        for (const [roomId, room] of rooms) {
+            if (room.players.has(socket.id)) {
+                room.cancelReadyTimer();
+                break;
+            }
+        }
+    });
+    
+    // Player death/respawn debug notifications
+    socket.on('playerDeath', (data) => {
+        const px = Number(data?.x) || 0;
+        const py = Number(data?.y) || 0;
+        const name = (data && data.name) ? String(data.name) : String(socket.id).substring(0, 6);
+        console.log(`[Server] Player ${name} (${socket.id}) died at (${px.toFixed(1)}, ${py.toFixed(1)})`);
+        for (const [roomId, room] of rooms) {
+            if (!room.players.has(socket.id)) continue;
+            // Set authoritative health to 0 so all clients reflect dead state
+            try {
+                const p = room.players.get(socket.id);
+                if (p) p.health = 0;
+            } catch(_) {}
+            io.to(roomId).emit('playerDeath', { id: socket.id, name, x: px, y: py });
+            break;
+        }
+    });
+
+    socket.on('playerRespawn', (data) => {
+        let px = Number(data?.x) || 0;
+        let py = Number(data?.y) || 0;
+        const name = (data && data.name) ? String(data.name) : String(socket.id).substring(0, 6);
+        // Find room and clamp to bounds; also set authoritative position
+        let roomIdFound = null;
+        for (const [roomId, room] of rooms) {
+            if (!room.players.has(socket.id)) continue;
+            roomIdFound = roomId;
+            // Clamp to room boundary
+            const b = Number.isFinite(room.boundary) ? room.boundary : 1000;
+            px = Math.max(-b, Math.min(b, px));
+            py = Math.max(-b, Math.min(b, py));
+            // Set authoritative server position and health
+            try {
+                const p = room.players.get(socket.id);
+                if (p) {
+                    p.x = px; p.y = py;
+                    p.health = Math.max(1, p.healthMax || 100);
+                }
+            } catch(_) {}
+            break;
+        }
+        console.log(`[Server] Player ${name} (${socket.id}) respawned at (${px.toFixed(1)}, ${py.toFixed(1)})`);
+        if (roomIdFound) io.to(roomIdFound).emit('playerRespawn', { id: socket.id, name, x: px, y: py });
+    });
+    
+    // Artifact pickup/drop server authority
+    socket.on('artifactPickupRequest', (data) => {
+        const chestId = data && data.chestId;
+        if (!chestId) return;
+        for (const [roomId, room] of rooms) {
+            if (!room.players.has(socket.id)) continue;
+            const chest = room.chests.get(chestId);
+            if (!chest || !chest.opened || chest.variant === 'brown') break;
+            if (chest.artifactCarriedBy) break; // already taken
+            // Accept pickup request
+            chest.artifactCarriedBy = socket.id;
+            // Broadcast to everyone in room
+            io.to(roomId).emit('artifactPickedUp', { chestId: chest.id, playerId: socket.id });
+            break;
+        }
+    });
+
+    socket.on('artifactDropRequest', (data) => {
+        const chestId = data && data.chestId;
+        if (!chestId) return;
+        const x = Number(data.x), y = Number(data.y);
+        const vx = Number.isFinite(data.vx) ? data.vx : 0;
+        const vy = Number.isFinite(data.vy) ? data.vy : 0;
+        for (const [roomId, room] of rooms) {
+            if (!room.players.has(socket.id)) continue;
+            const chest = room.chests.get(chestId);
+            if (!chest || !chest.opened || chest.variant === 'brown') break;
+            if (chest.artifactCarriedBy !== socket.id) break; // only carrier can drop
+            chest.artifactCarriedBy = null;
+            chest.artifactPos = { x: x, y: y };
+            io.to(roomId).emit('artifactDropped', { chestId: chest.id, x, y, vx, vy });
+            break;
+        }
+    });
+
+    // Inventory item drop/pickup (server-authoritative, for HexStat-style items)
+    socket.on('inventoryDropRequest', (data) => {
+        // data: { items: [{ label, rarityName, color }], x, y, baseAngle, speed }
+        for (const [roomId, room] of rooms) {
+            if (!room.players.has(socket.id)) continue;
+            const items = Array.isArray(data?.items) ? data.items : [];
+            const count = Math.min(10, Math.max(1, items.length));
+            const created = [];
+            const baseX = Number(data.x) || 0;
+            const baseY = Number(data.y) || 0;
+            
+            for (let i = 0; i < count; i++) {
+                const d = items[i]; if (!d) continue;
+                const id = `itm_${room.nextItemId++}`;
+                const ang = (data.baseAngle || 0) + (i * (2 * Math.PI / Math.max(1, count)));
+                
+                // Find a clear position for this item
+                const pos = room.findClearGroundPosition(baseX, baseY, ang);
+                
+                // Create item with resolved position and minimal velocity (just for visual effect)
+                const item = { 
+                    id, 
+                    x: pos.x, 
+                    y: pos.y, 
+                    vx: 0, 
+                    vy: 0, 
+                    label: d.label, 
+                    rarityName: d.rarityName, 
+                    color: d.color 
+                };
+                room.groundItems.set(id, item);
+                created.push(item);
+            }
+            if (created.length > 0) io.to(roomId).emit('inventoryDropped', { items: created });
+            break;
+        }
+    });
+
+    socket.on('inventoryPickupRequest', (data) => {
+        // data: { id }
+        const id = data && data.id;
+        if (!id) return;
+        for (const [roomId, room] of rooms) {
+            if (!room.players.has(socket.id)) continue;
+            const item = room.groundItems.get(id);
+            if (!item) break;
+            room.groundItems.delete(id);
+            io.to(roomId).emit('inventoryPickedUp', { id });
+            break;
+        }
+    });
+    
+    socket.on('invincibilityToggle', (data) => {
+        console.log(`[Server] Player ${socket.id} toggling invincibility:`, data.invincible);
+        // Find which room this player is in and broadcast to all players in that room
+        for (const [roomId, room] of rooms) {
+            if (room.players.has(socket.id)) {
+                io.to(roomId).emit('invincibilitySync', {
+                    invincible: data.invincible,
+                    fromPlayer: socket.id
+                });
+                console.log(`[Server] Broadcasted invincibility state (${data.invincible}) to all players in room ${roomId}`);
+                break;
+            }
+        }
+    });
+    
+    socket.on('createTargetDummy', (data) => {
+        // Find which room this player is in
+        for (const [roomId, room] of rooms) {
+            if (room.players.has(socket.id)) {
+                room.createTargetDummy();
+                break;
+            }
+        }
+    });
+    
+    socket.on('targetDummyDamage', (data) => {
+        // data: { damage, noDamage }
+        const damage = data && typeof data.damage === 'number' ? data.damage : 0;
+        const noDamage = data && data.noDamage;
+        if (damage <= 0) return;
+        
+        // Skip damage if noDamage flag is set (for visual-only bullets like shotgun cones)
+        if (noDamage) return;
+        
+        // Find which room this player is in and damage the target dummy
+        for (const [roomId, room] of rooms) {
+            if (room.players.has(socket.id)) {
+                room.damageTargetDummy(damage, socket.id);
+                break;
+            }
+        }
+    });
+    
+    socket.on('targetDummyDot', (data) => {
+        // data: { dps, duration }
+        const dps = data && typeof data.dps === 'number' ? data.dps : 0;
+        const duration = data && typeof data.duration === 'number' ? data.duration : 0;
+        if (dps <= 0 || duration <= 0) return;
+        
+        // Find which room this player is in and apply DOT to the target dummy
+        for (const [roomId, room] of rooms) {
+            if (room.players.has(socket.id)) {
+                room.applyDotToTargetDummy(dps, duration, socket.id);
+                break;
+            }
+        }
+    });
+    
+    // Bullet firing synchronization
+    socket.on('bulletFired', (data) => {
+        // Find which room this player is in and broadcast bullet to all other players
+        for (const [roomId, room] of rooms) {
+            if (room.players.has(socket.id)) {
+                // Broadcast to all players in room except the sender
+                socket.to(roomId).emit('bulletFired', {
+                    ...data,
+                    playerId: socket.id
+                });
+                break;
+            }
+        }
+    });
+    
+    // VFX synchronization
+    socket.on('vfxCreated', (data) => {
+        // Find which room this player is in and broadcast VFX to all other players
+        for (const [roomId, room] of rooms) {
+            if (room.players.has(socket.id)) {
+                // Broadcast to all players in room except the sender
+                socket.to(roomId).emit('vfxCreated', {
+                    ...data,
+                    playerId: socket.id
+                });
+                break;
+            }
+        }
+    });
+    
+    // Weapon damage relays (client-authoritative for enemy damage replication)
+    socket.on('explosionDamage', (data) => {
+        // data: { hits: [{ id, damage, crit }] }
+        for (const [roomId, room] of rooms) {
+            if (!room.players.has(socket.id)) continue;
+            // Relay to all others in the room
+            socket.to(roomId).emit('explosionDamage', {
+                hits: Array.isArray(data?.hits) ? data.hits : []
+            });
+            break;
+        }
+    });
+    socket.on('projectileHit', (data) => {
+        // data: { id, damage, crit, x, y, color, dirX, dirY, impactScale }
+        for (const [roomId, room] of rooms) {
+            if (!room.players.has(socket.id)) continue;
+            // Relay to all others in the room
+            socket.to(roomId).emit('projectileHit', {
+                id: data?.id,
+                damage: Number(data?.damage) || 0,
+                crit: !!data?.crit,
+                x: Number.isFinite(data?.x) ? Number(data.x) : undefined,
+                y: Number.isFinite(data?.y) ? Number(data.y) : undefined,
+                color: data?.color,
+                dirX: Number.isFinite(data?.dirX) ? Number(data.dirX) : undefined,
+                dirY: Number.isFinite(data?.dirY) ? Number(data.dirY) : undefined,
+                impactScale: Number.isFinite(data?.impactScale) ? Number(data.impactScale) : undefined
+            });
+            break;
+        }
+    });
+    
+    // Client-confirmed enemy death: remove from authoritative set to stop AI immediately
+    socket.on('enemyDied', (data) => {
+        try {
+            const id = data && data.id;
+            if (!id) return;
+            for (const [roomId, room] of rooms) {
+                if (!room.players.has(socket.id)) continue;
+                if (room.enemies && room.enemies.has(id)) {
+                    const e = room.enemies.get(id);
+                    
+                    // If it's a boomer, trigger explosion and create puke pool
+                    if (e && e.type === 'boomer') {
+                        // Broadcast explosion VFX and pooled puddle creation
+                        io.to(roomId).emit('boomerExploded', { id: e.id, x: e.x, y: e.y });
+                        // Register authoritative pool (lasts ~12s to match client visual, radius ~100)
+                        try { 
+                            if (!room.boomerPools) room.boomerPools = [];
+                            room.boomerPools.push({ x: e.x, y: e.y, radius: 100, ttl: 12.0 }); 
+                        } catch(_) {}
+                        // Apply explosion damage to nearby players (server-authoritative)
+                        const blastRadius = 100;
+                        const inner = 20;
+                        for (const [, p] of room.players) {
+                            if (!p) continue;
+                            const dxp = (p.x || 0) - e.x;
+                            const dyp = (p.y || 0) - e.y;
+                            const dp = Math.hypot(dxp, dyp);
+                            if (dp <= blastRadius + (p.radius || 0)) {
+                                // Respect invincibility if synced
+                                if (p.invincible === true) continue;
+                                const outer = blastRadius;
+                                let tp = (dp - inner) / Math.max(1e-6, (outer - inner));
+                                tp = Math.max(0, Math.min(1, tp));
+                                const dmg = 95 - 75 * tp;
+                                p.health = Math.max(0, (p.health || 0) - dmg);
+                                // Broadcast health to player and room
+                                try { p.socket.emit('playerHealth', { health: p.health, from: 'boomer' }); } catch(_) {}
+                                io.to(roomId).emit('playerHealthUpdate', { playerId: p.id, health: p.health });
+                            }
+                        }
+                    }
+                    
+                    room.enemies.delete(id);
+                    if (e) e.alive = false;
+                }
+                break;
+            }
+        } catch (e) {
+            console.error('[Server] enemyDied handler error:', e && e.stack ? e.stack : String(e));
+        }
+    });
+    socket.on('dotTick', (data) => {
+        // data: { id, amount, crit }
+        for (const [roomId, room] of rooms) {
+            if (!room.players.has(socket.id)) continue;
+            socket.to(roomId).emit('dotTick', {
+                id: data?.id,
+                amount: Number(data?.amount) || 0,
+                crit: !!data?.crit
+            });
+            break;
+        }
+    });
+
+    socket.on('disconnect', () => {
+        console.log(`Client disconnected: ${socket.id}`);
+        serverDebugger.playerDisconnect(socket.id, 'unknown', 'client disconnect');
+        
+        // Remove player from all rooms
+        for (const [roomId, room] of rooms) {
+            if (room.players.has(socket.id)) {
+                room.removePlayer(socket.id);
+                break;
+            }
+        }
+    });
+});
+
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, '0.0.0.0', () => {
+    console.log(`Game server running on port ${PORT}`);
+});
+
+
+
+
+
+
+
+

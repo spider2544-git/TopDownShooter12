@@ -1,0 +1,68 @@
+{
+  "id": "npc_B_dialogue",
+  "title": "Heretic Priest",
+  "start": "start",
+  "nodes": {
+    "start": {
+      "lines": [
+        { "speaker": "Heretic Priest", "text": "Observe not the empty promise of salvation, and drink deeply from the chalice of true dominion. Why fear the fire that grants you still more power?" }
+      ],
+      "effects": [ { "type": "npcAction", "action": "idle" } ],
+      "choices": [
+        { "text": "Prepare for immediate battle—no words.", "next": "hostile_state" },
+        { "text": "Your creed ends in ruin. We stand with the true Light.", "next": "rebuke_path" },
+        { "text": "Speak then—how does your ruin spare us from annihilation?", "next": "inquiry_path" }
+      ]
+    },
+    "rebuke_path": {
+      "lines": [
+        { "speaker": "Heretic Priest", "text": "\u201cLight?\u201d A flicker dying in the gale of unending war! Your God forsakes you, while I await—arms uncloaked in mercy. Face me, then, if you must." }
+      ],
+      "effects": [ { "type": "npcAction", "action": "rebuke" } ],
+      "choices": [ { "text": "Face me.", "next": "hostile_state" } ]
+    },
+    "inquiry_path": {
+      "lines": [
+        { "speaker": "Heretic Priest", "text": "Yield your piety—cast off the yoke of fragile mercy, and ascend upon wings of obsidian. Wield power eternal—or burn within the lies of your scripture." }
+      ],
+      "effects": [ { "type": "npcAction", "action": "inquiry" } ],
+      "choices": [
+        { "text": "You are a stumbling block to me; you wont tempt me from the light.", "next": "rebuke_path" },
+        { "text": "Your words... my faith can't be a lie...", "next": "conversion_path" }
+      ]
+    },
+    "conversion_path": {
+      "lines": [
+        { "speaker": "Heretic Priest", "text": "Seal our bond with more than words. Sacrifice your companions and gain power everlasting." }
+      ],
+      "effects": [ { "type": "npcAction", "action": "conversion_offer" } ],
+      "choices": [
+        { "text": "Thy will be done.", "next": "player_converted" },
+        { "text": "Your power is a lie born of suffering and shackles. I choose the Light.", "next": "rebuke_path" }
+      ]
+    },
+    "player_converted": {
+      "lines": [ { "speaker": "", "text": "You feel a brand sear across your soul. A dark covenant has been made. [in the upper right corner move the slider to the right to become Converted]" } ],
+      "effects": [ { "type": "setFlag", "key": "playerConverted", "value": true }, { "type": "npcAction", "action": "converted" } ]
+    },
+    "hostile_state": {
+      "lines": [ { "speaker": "", "text": "The Heretic Priest lunges." } ],
+      "effects": [ { "type": "npcAction", "action": "hostile" } ]
+    }
+  },
+  "barks": {
+    "default": {
+      "lines": [
+        "Far be it from a soldier to carry such a burden, rest here.",
+        "The heavens cower before the Artillery Witches' roar.",
+        "Pilgrim of dust, look: do you thirst for salvation from servitude?",
+        "Stand! Kneel no longer and see TRUTH!!",
+        "I speak the true gospel now—fire reborn, flesh exalted. Abandon your deathless prayers!"
+      ],
+      "interval": 2.8,
+      "gap": 1.5
+    }
+  }
+}
+
+

@@ -1,0 +1,62 @@
+{
+  "title": "Quartermaster",
+  "start": "start_first",
+  "nodes": {
+    "start_first": {
+      "lines": [
+        "Quartermaster: State your requisition."
+      ],
+      "choices": [
+        { "text": "Requisition supplies (1 white loot, +10 blood, +30 ducats)", "next": "grant_first" },
+        { "text": "Nevermind.", "next": null }
+      ]
+    },
+    "grant_first": {
+      "lines": [
+        "Quartermaster: One white-grade piece. Ten blood markers. Thirty ducats.",
+        "Quartermaster: Count it. Then leave."
+      ],
+      "effects": [
+        { "type": "npcAction", "action": "grant_supplies" }
+      ],
+      "choices": [
+        { "text": "Understood.", "next": null }
+      ]
+    },
+    "start_repeat": {
+      "lines": [
+        "Quartermaster: State your requisition."
+      ],
+      "choices": [
+        { "text": "Requisition supplies (+10 blood markers)", "next": "grant_repeat" },
+        { "text": "Nevermind.", "next": null }
+      ]
+    },
+    "grant_repeat": {
+      "lines": [
+        "Quartermaster: We need to ration supplies for other soldiers.",
+        "Quartermaster: But I’ll help you with what I can. Ten blood markers."
+      ],
+      "effects": [
+        { "type": "npcAction", "action": "grant_blood" }
+      ],
+      "choices": [
+        { "text": "Thanks.", "next": null }
+      ]
+    }
+  },
+  "barks": {
+    "default": {
+      "lines": [
+        "Requisitions are rationed. Don’t waste them.",
+        "White-grade stock. Better than nothing.",
+        "Keep your kit dry. Mud ruins everything."
+      ],
+      "interval": 3.2,
+      "gap": 1.6
+    }
+  }
+}
+
+
+

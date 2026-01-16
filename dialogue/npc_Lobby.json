@@ -1,0 +1,42 @@
+{
+  "title": "New Antioch Crowd",
+  "barks": {
+    "default": {
+      "lines": [
+        "Saints keep the lamps lit tonight.",
+        "Mud to the ankles, thunder to the heart.",
+        "Share your fire, brother—cold bites worse than lead.",
+        "She sells bandages by the chapel; tell her I sent you.",
+        "When the shells fall, count to ten and breathe.",
+        "New Antioch stands while we stand for each other.",
+        "Keep your blessings close and your head lower.",
+        "I heard the witch again—to the east, past the mills.",
+        "Trade a prayer? I’ve a spare." ,
+        "Fortune favors the quiet step."
+      ],
+      "interval": 3.6,
+      "gap": 1.4
+    },
+    "idle": {
+      "lines": [
+        "Water first, then bread; pride can wait.",
+        "Mend your strap—loose kit invites bad luck.",
+        "No man marches alone here.",
+        "Saints keep the lamps lit tonight.",
+        "Mud to the ankles, thunder to the heart.",
+        "Share your fire, brother—cold bites worse than lead.",
+        "She sells bandages by the chapel; tell her I sent you.",
+        "When the shells fall, count to ten and breathe.",
+        "New Antioch stands while we stand for each other.",
+        "Keep your blessings close and your head lower.",
+        "I heard the witch again—to the east, past the mills.",
+        "Trade a prayer? I’ve a spare." ,
+        "Fortune favors the quiet step."
+      ],
+      "interval": 3.2,
+      "gap": 1.2
+    }
+  }
+}
+
+

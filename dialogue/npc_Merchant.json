@@ -1,0 +1,114 @@
+{
+  "title": "Merchant of New Antioch",
+  "start": "start",
+  "barks": {
+    "default": {
+      "lines": [
+        "Effendi, your boots carry the dust of many roads.",
+        "Coin is a loyal shield; prices are fair as honor.",
+        "Steel for the bold, salves for the wounded, and rumors for the wise."
+      ],
+      "interval": 3.2,
+      "gap": 1.4
+    },
+    "idle": {
+      "lines": [
+        "By Saint George's lance, I've seen quieter markets.",
+        "New Antioch remembers those who pay their debts.",
+        "Sharpen your edge, temper your heart."
+      ],
+      "interval": 3.0,
+      "gap": 1.2
+    }
+  },
+  "nodes": {
+    "start": {
+      "lines": [
+        { "speaker": "Merchant", "text": "Peace upon your path, traveler. New Antioch deals in wares and wisdom." },
+        { "speaker": "Merchant", "text": "What balm do you seek—iron for the arm, or counsel for the heart?" }
+      ],
+      "choices": [
+        { "text": "Show me your wares.", "next": "wares" },
+        { "text": "Any news from the front?", "next": "news" },
+        { "text": "Who are you?", "next": "about" },
+        { "text": "Farewell.", "next": "end" }
+      ]
+    },
+    "wares": {
+      "lines": [
+        { "speaker": "Merchant", "text": "My stall is humble but honest. Blades that bite, tonics that mend, and charms to cheat despair." },
+        { "speaker": "Merchant", "text": "Though the scales are just, favor smiles on those who return." }
+      ],
+      "choices": [
+        { "text": "I'm looking for something swift.", "next": "wares_swift" },
+        { "text": "Do you sell protection?", "next": "wares_protect" },
+        { "text": "Back.", "next": "start" }
+      ]
+    },
+    "wares_swift": {
+      "lines": [
+        { "speaker": "Merchant", "text": "A keen edge and lighter step—swift as a hawk on the wind. I can arrange that." }
+      ],
+      "choices": [
+        { "text": "Back to wares.", "next": "wares" },
+        { "text": "Back.", "next": "start" }
+      ]
+    },
+    "wares_protect": {
+      "lines": [
+        { "speaker": "Merchant", "text": "Armor is the shell; resolve is the heart. I sell the former—may God grant you the latter." }
+      ],
+      "choices": [
+        { "text": "Back to wares.", "next": "wares" },
+        { "text": "Back.", "next": "start" }
+      ]
+    },
+    "news": {
+      "lines": [
+        { "speaker": "Merchant", "text": "The trenches whisper—east winds carry smoke, west winds carry saints." },
+        { "speaker": "Merchant", "text": "A witch shells the valley; a relic glows where three roads meet. Walk guarded." }
+      ],
+      "choices": [
+        { "text": "Three roads?", "next": "roads" },
+        { "text": "The witch?", "next": "witch" },
+        { "text": "Back.", "next": "start" }
+      ]
+    },
+    "roads": {
+      "lines": [
+        { "speaker": "Merchant", "text": "A pilgrim’s mark scratched in stone—follow it at dusk and you’ll see what the careful miss." }
+      ],
+      "choices": [
+        { "text": "Back to news.", "next": "news" },
+        { "text": "Back.", "next": "start" }
+      ]
+    },
+    "witch": {
+      "lines": [
+        { "speaker": "Merchant", "text": "They call her Artillery Witch. Steel fears her less than crowds do." },
+        { "speaker": "Merchant", "text": "If you must stand before her thunder, keep moving and do not bargain with fear." }
+      ],
+      "choices": [
+        { "text": "Back to news.", "next": "news" },
+        { "text": "Back.", "next": "start" }
+      ]
+    },
+    "about": {
+      "lines": [
+        { "speaker": "Merchant", "text": "I am but a trader of New Antioch—sworn to fair measure, bound to quiet roads." },
+        { "speaker": "Merchant", "text": "Once I carried a spear. Now I carry debts and blessings. Both are heavy in their hour." }
+      ],
+      "choices": [
+        { "text": "Back.", "next": "start" }
+      ]
+    },
+    "end": {
+      "lines": [
+        { "speaker": "Merchant", "text": "Walk in mercy, strike in certainty. My stall will be here when the dust settles." }
+      ],
+      "choices": []
+    }
+  }
+}
+
+

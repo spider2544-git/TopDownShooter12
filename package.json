@@ -1,0 +1,19 @@
+{
+  "name": "top-down-shooter-multiplayer",
+  "version": "1.0.0",
+  "description": "Multiplayer top-down shooter game",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "nfc-pcsc": "^0.8.1",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

@@ -1,0 +1,116 @@
+{
+  "title": "Commander of New Antioch",
+  "start": "start",
+  "barks": {
+    "default": {
+      "lines": [
+        "Your charge: find the Artillery Witch and end her thunder.",
+        "Report says a heretic priest stalks the outskirts—keep holy steel ready.",
+        "An ecclesiastic prisoner is missing. His mission failed; find his trail."
+      ],
+      "interval": 3.0,
+      "gap": 1.4
+    }
+  },
+  "nodes": {
+    "start": {
+      "lines": [
+        { "speaker": "Commander", "text": "Stand to, soldier. New Antioch bleeds while the Artillery Witch shells our borders." },
+        { "speaker": "Commander", "text": "Three matters require your ear. Choose your counsel." }
+      ],
+      "choices": [
+        { "text": "[Test Level] Developer testing area", "next": "select_test" },
+        { "text": "[Extraction] Hunt the Artillery Witch and recover the artifact from her domain", "next": "select_extraction" },
+        { "text": "[Payload] Escort the supply shipment through enemy-held territory", "next": "select_payload" },
+        { "text": "[Trench Raid] Infiltrate the enemies trenches and take their artifact back to your position", "next": "select_trenchraid" },
+        { "text": "Tell me about the Artillery Witch.", "next": "witch" },
+        { "text": "You mentioned a heretic priest.", "next": "priest" },
+        { "text": "The missing ecclesiastic prisoner—what of him?", "next": "prisoner" },
+        { "text": "That is all.", "next": "end" }
+      ]
+    },
+    "select_test": {
+      "lines": [
+        { "speaker": "Commander", "text": "Test deployment selected. Return to the zone when ready." }
+      ],
+      "effects": [{ "type": "setFlag", "key": "selectedLevel", "value": "test" }],
+      "choices": [
+        { "text": "Understood.", "next": "end" }
+      ]
+    },
+    "select_extraction": {
+      "lines": [
+        { "speaker": "Commander", "text": "Extraction mission confirmed. Eliminate the Witch and secure the artifact." }
+      ],
+      "effects": [{ "type": "setFlag", "key": "selectedLevel", "value": "extraction" }],
+      "choices": [
+        { "text": "We move out.", "next": "end" }
+      ]
+    },
+    "select_payload": {
+      "lines": [
+        { "speaker": "Commander", "text": "Payload escort confirmed. Protect the shipment at all costs." }
+      ],
+      "effects": [{ "type": "setFlag", "key": "selectedLevel", "value": "payload" }],
+      "choices": [
+        { "text": "We're ready.", "next": "end" }
+      ]
+    },
+    "select_trenchraid": {
+      "lines": [
+        { "speaker": "Commander", "text": "Trench raid confirmed. Move through the mud and take their Artifact back to us. Steel yourself—it's dark work." }
+      ],
+      "effects": [{ "type": "setFlag", "key": "selectedLevel", "value": "trenchraid" }],
+      "choices": [
+        { "text": "Into the trenches.", "next": "end" }
+      ]
+    },
+    "witch": {
+      "lines": [
+        { "speaker": "Commander", "text": "She is artillery wrapped in blasphemy. Keep moving—her thunder punishes the still." },
+        { "speaker": "Commander", "text": "Break her wards, press the assault, and do not parley with fear." }
+      ],
+      "choices": [
+        { "text": "Understood. Anything else?", "next": "start" },
+        { "text": "We will end her barrage.", "next": "end" }
+      ]
+    },
+    "priest": {
+      "lines": [
+        { "speaker": "Commander", "text": "A heretic priest was sighted in the region—cunning and venom-tongued." },
+        { "speaker": "Commander", "text": "If he turns the flock, we fight two fronts. If you cross him, strike first and ask no catechism." }
+      ],
+      "choices": [
+        { "text": "We'll be watchful.", "next": "start" },
+        { "text": "If found, he will not leave standing.", "next": "end" }
+      ]
+    },
+    "prisoner": {
+      "lines": [
+        { "speaker": "Commander", "text": "An ecclesiastic prisoner—sent on penitent duty—has gone missing." },
+        { "speaker": "Commander", "text": "He failed his mission, yet the man may still be turned to service. Find him if you can." }
+      ],
+      "choices": [
+        { "text": "If I find him, what then?", "next": "prisoner_followup" },
+        { "text": "We'll keep an eye out.", "next": "start" }
+      ]
+    },
+    "prisoner_followup": {
+      "lines": [
+        { "speaker": "Commander", "text": "If he shows contrition, bind him to the task: the Witch must fall." },
+        { "speaker": "Commander", "text": "If he turns heretic, deliver judgment. Mercy for the faithful; fire for the faithless." }
+      ],
+      "choices": [
+        { "text": "Clear. Back to orders.", "next": "start" },
+        { "text": "Understood.", "next": "end" }
+      ]
+    },
+    "end": {
+      "lines": [
+        { "speaker": "Commander", "text": "Go, then. Steel steady, heart steady. New Antioch watches." }
+      ]
+    }
+  }
+}
+
+

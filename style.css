@@ -1,0 +1,15 @@
+html, body {
+	margin: 0;
+	padding: 0;
+	background: #0e0e12;
+	height: 100%;
+}
+
+#game {
+	display: block;
+	width: 100vw;
+	height: 100vh;
+	/* Ensure crisp lines for the grid */
+	image-rendering: pixelated;
+}
+
