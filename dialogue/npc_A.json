@@ -1,0 +1,98 @@
+{
+  "id": "Ecclesiastic Prisoner",
+  "title": "Ecclesiastic Prisoner",
+  "start": "start",
+  "nodes": {
+    "start": {
+      "lines": [
+        { "speaker": "", "text": "Here I sit, useless, shamed, chained by my own failure to find my quarry." }
+      ],
+      "effects": [ { "type": "npcAction", "action": "default" } ],
+      "choices": [
+        { "text": "who do you seek?", "next": "seek" },
+        { "text": "this is of no concern to me", "next": "leave1" }
+      ]
+    },
+    "leave1": {
+      "lines": [ { "speaker": "Player", "text": "Leave" } ]
+    },
+    "seek": {
+      "lines": [
+        { "speaker": "", "text": "I seek the accursed Witch whose Artillery blights the heavens... Are you A certain man from Cyrene, here to lend a shoulder to my burden?" }
+      ],
+      "choices": [
+        { "text": "We shall see the Witch Undone brother.", "next": "vow" },
+        { "text": "your duty is not our burden, we seek only the Artifact, you must carry it alone", "next": "failure" },
+        { "text": "I only wish to gather riches for our lord Mammon", "next": "mammon" }
+      ]
+    },
+    "vow": {
+      "lines": [ { "speaker": "", "text": "hear our vow!! Lead, and I shall follow; for as i am bound in chains, so is my task bound to you. We shall smite the witch!" } ],
+      "choices": [ { "text": "We shall not rest till she is dead", "next": "follow_state" } ]
+    },
+    "follow_state": {
+      "lines": [ { "speaker": "", "text": "The Ecclesiastic Prisoner follows the player" } ],
+      "effects": [ { "type": "npcAction", "action": "follow" } ]
+    },
+    "failure": {
+      "lines": [ { "speaker": "", "text": "Then my failure is complete. leave me, i shall take this useless rabble along with me as penance for my transgressions. may that be tithe enough" } ],
+      "choices": [ { "text": "Leave", "next": "end" } ]
+    },
+    "mammon": {
+      "lines": [ { "speaker": "", "text": "Riches for...Mammon??" } ],
+      "choices": [ { "text": "his wealth is unquenchable, i seek only to prove my worth to him", "next": "hostile_state" } ]
+    },
+    "hostile_state": {
+      "lines": [ { "speaker": "", "text": "The Ecclesiastic Prisoners fuse is lit" } ],
+      "effects": [ { "type": "npcAction", "action": "hostile" } ]
+    },
+    "run_boss_state": {
+      "lines": [ { "speaker": "", "text": "Point me to the Witch, and I shall run to her!" } ],
+      "effects": [ { "type": "npcAction", "action": "run_to_boss" } ]
+    },
+    "end": {
+      "lines": [ { "speaker": "", "text": "Shame!! Ive Failed Lost all is lost I must find her" } ]
+    }
+  },
+  "barks": {
+    "default": {
+      "lines": ["SHAME", "Ive Failed", "Lost all is lost", "I must find her"],
+      "interval": 2.8,
+      "gap": 1.5
+    },
+    "follow": {
+      "lines": [
+        "My Blood is Tithe enough",
+        "Do not stray from the path. for the Witch awaits us",
+        "Every step astray Shortens my fuse.",
+        "when time comes, together we shall drink the sacrament of fire",
+        "the witch shall taste the sacrament of fire!"
+      ],
+      "interval": 3.0,
+      "gap": 1.6
+    },
+    "hostile": {
+      "lines": ["HERETIC!! Let the cleansing Flames Smite your wickedness"],
+      "interval": 2.2,
+      "gap": 1.2
+    },
+    "run_to_boss": {
+      "lines": ["Drink ye the SACRAMENT OF FIRE WITCH!!!"],
+      "interval": 2.6,
+      "gap": 1.4
+    },
+    "betrayed": {
+      "lines": [
+        "You break the vow? You choose flight over justice...",
+        "My trust was your tithe; you spill it like water.",
+        "If the covenant is ash, then so am I — and so are you.",
+        "Let the sacrament of fire judge the faithless."
+      ],
+      "interval": 2.4,
+      "gap": 1.2
+    }
+  }
+}
+
+
+
